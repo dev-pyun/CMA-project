@@ -5,10 +5,27 @@
 # Usage:
 #     ./pipeline.sh <experiment_name> [input_mode] [gpu_ids]
 #
+# Input modes  (H5 patches always contain B1–B7 + B9, 8 spectral channels):
+#   Preset:
+#     swirndsi      - B2–B7 + NDSI               (7 ch) [default]
+#     cirrus_ndsi   - B2–B7 + B9 + NDSI           (8 ch)
+#     all_cirrus    - B1–B7 + B9                  (8 ch)
+#     allndsi       - B1–B7 + NDSI                (8 ch)
+#     swirndsindwi  - B2–B7 + NDSI + NDWI         (8 ch)
+#     swirndwi      - B2–B7 + NDWI                (7 ch)
+#     all           - B1–B7                       (7 ch)
+#     vnir          - B2–B5                       (4 ch)
+#     rgb           - B2–B4                       (3 ch)
+#   Custom (pass "custom" as mode and set --bands / --indices in train.py):
+#     python train.py ... --inp_mode custom --bands B2 B3 B4 B5 B9 --indices NDSI
+#
 # Examples:
-#     ./pipeline.sh weddell_exp1                      # default: swirndsi, GPU 0 1
-#     ./pipeline.sh weddell_exp1 swirndsi "0 1"
+#     ./pipeline.sh weddell_exp1                           # swirndsi, GPU 0 1
+#     ./pipeline.sh weddell_exp1 cirrus_ndsi "0 1"         # use Cirrus band
 #     ./pipeline.sh weddell_exp1 allndsi "0"
+#
+# Prerequisite — create H5 patches once before training:
+#     python make_landsat_data.py --mode train --path /path/to/landsat/scenes
 # ============================================================================
 
 set -e

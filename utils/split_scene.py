@@ -15,7 +15,8 @@ Output HDF5 layout  (256 × 256 patches):
     data[:, :, 4]  → B5  (NIR)
     data[:, :, 5]  → B6  (SWIR1)
     data[:, :, 6]  → B7  (SWIR2)
-    data[:, :, 7]  → QA_PIXEL labels  (remapped to 0–5)
+    data[:, :, 7]  → B9  (Cirrus, zero-filled if absent in source)
+    data[:, :, 8]  → QA_PIXEL labels  (remapped to 0–5)
 """
 
 import argparse
@@ -43,11 +44,12 @@ from utils.qa_pixel_mapping import qa_pixel_to_classes
 
 logger = logging.getLogger(__name__)
 
-# Landsat 8 bands to extract (order matters – defines channel index in H5)
-BAND_KEYS = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
+# Required spectral bands — scene is skipped if any are missing
+REQUIRED_BANDS = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
 
-# Optional bands that can be included
-OPTIONAL_BAND_KEYS = ['B9']  # Cirrus
+# All bands written to H5 (order = channel index); B9 is zero-filled if absent
+ALL_BANDS = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B9']
+N_SPECTRAL = len(ALL_BANDS)  # always 8
 
 
 def setup_logger():
@@ -68,8 +70,6 @@ def get_args(argv=None):
                         help='Processing mode')
     parser.add_argument('--patch_size', type=int, default=256,
                         help='Patch size in pixels (default: 256)')
-    parser.add_argument('--include_cirrus', action='store_true', default=False,
-                        help='Include B9 (Cirrus) band')
     parser.add_argument('--overlap', type=int, default=0,
                         help='Overlap between patches in pixels')
     return parser.parse_args(argv)
@@ -107,8 +107,7 @@ def read_band(filepath, window=None):
 
 
 def split_scene_to_patches(scene_dir, out_folder, mode='train',
-                           patch_size=256, overlap=0,
-                           include_cirrus=False):
+                           patch_size=256, overlap=0):
     """
     Split a single Landsat 8 scene into overlapping patches saved as HDF5.
 
@@ -124,28 +123,28 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
         Size of each square patch (pixels).
     overlap : int
         Overlap between adjacent patches (pixels).
-    include_cirrus : bool
-        Whether to include B9 (Cirrus) band.
     """
     scene_name = os.path.basename(scene_dir)
 
-    # Determine which bands to load
-    bands_to_load = BAND_KEYS.copy()
-    if include_cirrus:
-        bands_to_load.extend(OPTIONAL_BAND_KEYS)
-
-    # Find all band files
+    # Find required band files (B1–B7); scene is skipped if any are missing
     band_files = {}
-    for bk in bands_to_load:
+    for bk in REQUIRED_BANDS:
         bf = find_band_file(scene_dir, bk)
         if bf is None:
-            logger.warning(f'  Band {bk} not found in {scene_name}, skipping.')
-            continue
-        band_files[bk] = bf
+            logger.warning(f'  Band {bk} not found in {scene_name}.')
+        else:
+            band_files[bk] = bf
 
-    if len(band_files) < len(BAND_KEYS):
+    if len(band_files) < len(REQUIRED_BANDS):
         logger.error(f'  Missing core bands in {scene_name}, skipping scene.')
         return 0
+
+    # B9 (Cirrus): always attempted; zero-filled if absent
+    b9_file = find_band_file(scene_dir, 'B9')
+    if b9_file is not None:
+        band_files['B9'] = b9_file
+    else:
+        logger.info(f'  B9 not found in {scene_name}, zero-filling channel 7.')
 
     # QA_PIXEL
     qa_file = find_qa_pixel_file(scene_dir)
@@ -160,9 +159,8 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
         img_height = ref.height
         img_width = ref.width
 
-    n_bands = len(band_files)
-    # +1 for QA_PIXEL label channel
-    n_channels = n_bands + (1 if qa_file else 0)
+    # Always N_SPECTRAL (8) band channels + 1 QA_PIXEL label channel
+    n_channels = N_SPECTRAL + (1 if qa_file else 0)
 
     # Compute patch grid
     step = patch_size - overlap
@@ -196,24 +194,21 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
             patch_data = np.zeros((patch_size, patch_size, n_channels),
                                  dtype=np.uint16)
 
-            ch = 0
-            for bk in bands_to_load:
+            for ch, bk in enumerate(ALL_BANDS):
                 if bk not in band_files:
-                    continue
+                    continue  # zero-fill (already zeros from np.zeros)
                 with raster_open(band_files[bk]) as src:
                     data = src.read(1, window=win)
-                # Handle edge cases where actual read size may differ
                 h, w = data.shape
                 patch_data[:h, :w, ch] = data
-                ch += 1
 
-            # QA_PIXEL → 6-class labels
+            # QA_PIXEL → 6-class labels (always at channel N_SPECTRAL)
             if qa_file:
                 with raster_open(qa_file) as src:
                     qa_data = src.read(1, window=win)
                 h, w = qa_data.shape
                 labels = qa_pixel_to_classes(qa_data)
-                patch_data[:h, :w, ch] = labels
+                patch_data[:h, :w, N_SPECTRAL] = labels
 
                 # Skip patches that are entirely No-Data
                 if mode == 'train' and np.all(labels == 0):
@@ -238,7 +233,7 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
 
 
 def make_patches(scene_parent_dir, out_folder, mode='train',
-                 patch_size=256, overlap=0, include_cirrus=False):
+                 patch_size=256, overlap=0):
     """
     Process all scene directories under a parent directory.
 
@@ -252,10 +247,10 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
         scene_dirs = [scene_parent_dir]
     else:
         # Look for subdirectories containing band files
-        for entry in sorted(os.listdir(scene_parent_dir)):
-            subdir = os.path.join(scene_parent_dir, entry)
-            if os.path.isdir(subdir) and find_band_file(subdir, 'B1') is not None:
-                scene_dirs.append(subdir)
+        for root, dirs, files in os.walk(scene_parent_dir):
+            if find_band_file(root, 'B1') is not None:
+                scene_dirs.append(root)
+                dirs.clear()
 
     if not scene_dirs:
         raise FileNotFoundError(
@@ -267,7 +262,7 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
     print(f'Found {total} scene(s) to process')
     print(f'Patch size: {patch_size}x{patch_size}, Overlap: {overlap}')
     print(f'Output: {out_folder}')
-    print(f'Cirrus (B9): {"included" if include_cirrus else "excluded"}')
+    print(f'Cirrus (B9): always included (zero-filled if absent)')
     print(f'================================\n')
 
     total_patches = 0
@@ -283,8 +278,7 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
         scene_pbar.set_description(f'Scene: {scene_name[:30]}')
         n = split_scene_to_patches(
             scene_dir, out_folder, mode=mode,
-            patch_size=patch_size, overlap=overlap,
-            include_cirrus=include_cirrus)
+            patch_size=patch_size, overlap=overlap)
         if n:
             total_patches += n
         scene_pbar.set_postfix(total_patches=total_patches)
@@ -323,5 +317,4 @@ if __name__ == '__main__':
         mode=args.mode,
         patch_size=args.patch_size,
         overlap=args.overlap,
-        include_cirrus=args.include_cirrus,
     )

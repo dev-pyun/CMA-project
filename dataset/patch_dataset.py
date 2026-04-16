@@ -28,8 +28,8 @@ np.set_printoptions(precision=4, suppress=True)
 
 WORKERS = 16
 
-# Number of core spectral bands (B1–B7)
-N_SPECTRAL_BANDS = 7
+# Spectral bands stored in H5: B1–B7 + B9 (Cirrus)
+N_SPECTRAL_BANDS = 8
 
 
 def set_seed(user_seed):

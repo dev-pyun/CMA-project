@@ -9,6 +9,7 @@ import os
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Data directories
+WEDDELL_SEA_SOURCE_PATH = '/earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea'
 DATA_ROOT = os.path.join(PROJECT_ROOT, 'data')
 
 # Raw Landsat 8 .SAFE-style directories (containing per-band TIF files)

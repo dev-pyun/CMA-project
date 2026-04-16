@@ -2,23 +2,27 @@
 GeoTIFF → HDF5 conversion entry point for Landsat 8 scenes.
 
 This script is a convenience wrapper that calls the scene splitting utility.
+All 8 spectral bands (B1–B7, B9) are always written to each H5 patch.
+B9 (Cirrus) is zero-filled when absent in the source.
 
 Usage:
-    # Process training data
+    # Process training data (default path: src/data/TRAIN/)
     python make_landsat_data.py --mode train
+
+    # Process from a custom path (supports nested year/month/date/scene structure)
+    python make_landsat_data.py --mode train --path /path/to/scenes
 
     # Process validation data
     python make_landsat_data.py --mode test
 
-    # Process custom path with cirrus band
-    python make_landsat_data.py --mode train --path /path/to/scenes --include_cirrus
-
-Data to copy into src/data/TRAIN/ (per scene, one folder per date):
-    Required: *_B1.TIF, *_B2.TIF, *_B3.TIF, *_B4.TIF,
-              *_B5.TIF, *_B6.TIF, *_B7.TIF, *_QA_PIXEL.TIF
-    Optional: *_B9.TIF (Cirrus, for cirrus_ndsi mode)
-    Not needed: *_B8.TIF (Pan), *_B10.TIF, *_B11.TIF (Thermal),
-                *_MTL.*, *_ANG.txt, SAA/SZA/VAA/VZA, thumbnail files
+Required files per scene directory:
+    *_B1.TIF, *_B2.TIF, *_B3.TIF, *_B4.TIF,
+    *_B5.TIF, *_B6.TIF, *_B7.TIF, *_QA_PIXEL.TIF
+Optional:
+    *_B9.TIF (Cirrus — zero-filled if absent, never skips a scene)
+Not needed:
+    *_B8.TIF (Pan), *_B10.TIF, *_B11.TIF (Thermal),
+    *_MTL.*, *_ANG.txt, SAA/SZA/VAA/VZA, thumbnail files
 """
 
 import sys
@@ -55,5 +59,4 @@ if __name__ == '__main__':
         mode=args.mode,
         patch_size=args.patch_size,
         overlap=args.overlap,
-        include_cirrus=args.include_cirrus,
     )

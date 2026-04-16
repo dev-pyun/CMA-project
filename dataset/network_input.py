@@ -13,9 +13,9 @@ Landsat 8 band layout in HDF5 (channel index):
     4: B5  NIR              (0.85–0.88 µm)
     5: B6  SWIR1            (1.57–1.65 µm)
     6: B7  SWIR2            (2.11–2.29 µm)
-    7: B9  Cirrus           (1.36–1.38 µm)  — only if include_cirrus=True
+    7: B9  Cirrus           (1.36–1.38 µm)  — always present (zero-filled if absent in source)
 
-Note: indices 0–6 are always present; index 7 (Cirrus) is optional.
+Note: all 8 channels (indices 0–7) are always present in H5 patches.
 """
 
 import torch

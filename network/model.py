@@ -229,7 +229,7 @@ class Model:
     # ------------------------------------------------------------------
     def generate_train_data(self, filenames, labels, label_gen=True):
         """Save model predictions into the HDF5 files for the next stage."""
-        n_bands = 7  # Core Landsat 8 bands (B1-B7)
+        n_bands = 8  # Spectral bands in H5: B1–B7 + B9
 
         for label, filename in zip(labels, filenames):
             label_np = label.cpu().numpy().astype(np.uint16)

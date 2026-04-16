@@ -1,19 +1,30 @@
 #!/bin/bash
 # ============================================================================
-# 4-Stage Self-Training Pipeline for Landsat 8 Cloud/Shadow/Snow Detection
+# Quick smoke-test pipeline (1 epoch per stage) for CI / dev verification.
 #
 # Usage:
-#     ./pipeline.sh <experiment_name> [input_mode] [gpu_ids]
+#     ./pipeline_test.sh <experiment_name> [input_mode] [gpu_ids]
+#
+# Input modes  (H5 patches always contain B1–B7 + B9, 8 spectral channels):
+#   Preset:
+#     swirndsi      - B2–B7 + NDSI               (7 ch) [default]
+#     cirrus_ndsi   - B2–B7 + B9 + NDSI           (8 ch)
+#     all_cirrus    - B1–B7 + B9                  (8 ch)
+#     allndsi       - B1–B7 + NDSI                (8 ch)
+#     swirndsindwi  - B2–B7 + NDSI + NDWI         (8 ch)
+#     swirndwi      - B2–B7 + NDWI                (7 ch)
+#     all           - B1–B7                       (7 ch)
+#     vnir          - B2–B5                       (4 ch)
+#     rgb           - B2–B4                       (3 ch)
 #
 # Examples:
-#     ./pipeline.sh weddell_exp1                      # default: swirndsi, GPU 0 1
-#     ./pipeline.sh weddell_exp1 swirndsi "0 1"
-#     ./pipeline.sh weddell_exp1 allndsi "0"
+#     ./pipeline_test.sh weddell_exp1                      # swirndsi, GPU 0 1
+#     ./pipeline_test.sh weddell_exp1 cirrus_ndsi "0 1"
 # ============================================================================
 
 set -e
 
-EXP_NAME=${1:?"Usage: ./pipeline.sh <experiment_name> [input_mode] [gpu_ids]"}
+EXP_NAME=${1:?"Usage: ./pipeline_test.sh <experiment_name> [input_mode] [gpu_ids]"}
 INP_MODE=${2:-swirndsi}
 GPU_IDS=${3:-"0 1"}
 
