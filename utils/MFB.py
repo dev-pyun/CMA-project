@@ -1,0 +1,69 @@
+"""
+Median Frequency Balancing (MFB) for computing class weights.
+
+The weight for each class is:
+    w_c = median(freq) / freq_c
+
+where freq_c is the relative frequency of class c across the training set.
+This gives lower weight to common classes and higher weight to rare ones.
+"""
+
+import logging
+
+import numpy as np
+import torch
+
+logger = logging.getLogger(__name__)
+
+NUM_CLASSES = 6
+
+
+def get_MFB_weights(dataloader, num_classes=NUM_CLASSES):
+    """
+    Iterate over the dataloader once and compute MFB weights.
+
+    Returns
+    -------
+    weights : np.ndarray  shape (num_classes,)
+    """
+    total_freq = np.zeros(num_classes, dtype=np.float64)
+
+    for _, labels, _ in dataloader:
+        lbl = labels[:, 0, :, :].numpy()  # (B, H, W)
+        for c in range(num_classes):
+            total_freq[c] += (lbl == c).sum()
+
+    total_pixels = total_freq.sum()
+    if total_pixels == 0:
+        logger.warning('No pixels found – returning uniform weights.')
+        return np.ones(num_classes, dtype=np.float32)
+
+    freq = total_freq / total_pixels
+    freq[freq == 0] = 1e-10  # avoid division by zero
+    median_freq = np.median(freq[freq > 1e-10])
+
+    weights = median_freq / freq
+    logger.info(f'Class frequencies: {freq}')
+    logger.info(f'MFB weights:       {weights}')
+    return weights.astype(np.float32)
+
+
+def calculate_file_freq(label_np, num_classes=NUM_CLASSES):
+    """
+    Compute per-class pixel frequencies for a single label patch.
+
+    Parameters
+    ----------
+    label_np : np.ndarray  (H, W)
+
+    Returns
+    -------
+    freq : np.ndarray  shape (num_classes,)
+    """
+    freq = np.zeros(num_classes, dtype=np.float64)
+    total = label_np.size
+    if total == 0:
+        return freq
+    for c in range(num_classes):
+        freq[c] = (label_np == c).sum() / total
+    return freq
