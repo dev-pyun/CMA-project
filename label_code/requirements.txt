@@ -1,0 +1,23 @@
+# Cloud Masking 사이드 프로젝트 의존성
+# Python 3.10+ 권장
+
+# 데이터 처리
+numpy>=1.24
+rasterio>=1.3.9
+scikit-image>=0.21
+h5py>=3.9
+tifffile>=2023.7
+
+# 라벨링 GUI (CPU에서 라벨링하는 사람 환경에 필요)
+"napari[all]>=0.4.18"
+PyQt5  # napari 백엔드
+
+# SAM 자동 segment (GPU 서버에서 권장, CPU도 가능 — 느림)
+torch>=2.0  # CUDA 빌드 권장 (https://pytorch.org/get-started/locally/)
+torchvision
+git+https://github.com/facebookresearch/segment-anything.git
+napari-sam  # napari plugin (선택)
+
+# 유틸
+tqdm
+matplotlib

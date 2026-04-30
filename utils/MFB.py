@@ -31,7 +31,7 @@ def get_MFB_weights(dataloader, num_classes=NUM_CLASSES):
     for _, labels, _ in dataloader:
         lbl = labels[:, 0, :, :].numpy()  # (B, H, W)
         for c in range(num_classes):
-            total_freq[c] += (lbl == c).sum()
+            total_freq[c] += (lbl == c).sum()  # nodata(255) excluded since 255 >= num_classes
 
     total_pixels = total_freq.sum()
     if total_pixels == 0:
@@ -51,6 +51,7 @@ def get_MFB_weights(dataloader, num_classes=NUM_CLASSES):
 def calculate_file_freq(label_np, num_classes=NUM_CLASSES):
     """
     Compute per-class pixel frequencies for a single label patch.
+    Nodata pixels (label == 255) are excluded from the denominator.
 
     Parameters
     ----------
@@ -60,10 +61,11 @@ def calculate_file_freq(label_np, num_classes=NUM_CLASSES):
     -------
     freq : np.ndarray  shape (num_classes,)
     """
-    freq = np.zeros(num_classes, dtype=np.float64)
-    total = label_np.size
+    freq  = np.zeros(num_classes, dtype=np.float64)
+    valid = label_np[label_np < num_classes]  # exclude nodata (255)
+    total = valid.size
     if total == 0:
         return freq
     for c in range(num_classes):
-        freq[c] = (label_np == c).sum() / total
+        freq[c] = (valid == c).sum() / total
     return freq

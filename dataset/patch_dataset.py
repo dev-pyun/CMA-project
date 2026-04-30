@@ -1,13 +1,22 @@
 """
-Patch dataset loader for Landsat 8 HDF5 files.
+Patch dataset loader for Landsat 8 Zarr patch files.
 
 Loads patches created by utils/split_scene.py and serves them as
-(spectral_image, labels, filename) tuples for training and validation.
+(input_tensor, labels, filename) tuples for training and validation.
 
-HDF5 data layout:
-    channels 0–6 : B1–B7 spectral bands (+ optional B9 at channel 7)
-    channel  N   : QA_PIXEL labels (6-class, added by split_scene.py)
-    channel  N+2 : pseudo-labels (added by label_generation.py in stage 1+)
+Zarr patch layout (one .zarr directory per patch):
+    spectral  (H, W, 8)  uint16   — B1–B7, B9 raw DN
+    rgb       (H, W, 3)  float32  — percentile-normalised RGB ∈ [0,1]
+    hsv       (H, W, 3)  float32  — H, S, V ∈ [0,1]
+    sobel     (H, W, 3)  float32  — Sobel X, Y, Magnitude
+    label     (H, W)     uint8    — binary: 0=no-cloud, 1=cloud, 255=no-data
+    pseudo_label (H, W)  uint8    — added by label_generation.py (stage 1+)
+
+Input tensor channel layout (17 channels):
+    0–7   : B1–B7, B9  (float32, /10000 normalised)
+    8–10  : RGB_R, RGB_G, RGB_B
+    11–13 : HSV_H, HSV_S, HSV_V
+    14–16 : Sobel_X, Sobel_Y, Sobel_Magnitude
 """
 
 import glob
@@ -15,9 +24,9 @@ import logging
 import os
 import random
 
-import h5py
 import numpy as np
 import torch
+import zarr
 from torch.utils.data import Dataset, ConcatDataset
 from torchvision.transforms import Compose
 
@@ -28,8 +37,11 @@ np.set_printoptions(precision=4, suppress=True)
 
 WORKERS = 16
 
-# Spectral bands stored in H5: B1–B7 + B9 (Cirrus)
-N_SPECTRAL_BANDS = 8
+N_SPECTRAL_BANDS = 8   # spectral channels in zarr 'spectral' array
+N_DERIVED        = 9   # rgb(3) + hsv(3) + sobel(3)
+N_TOTAL_CHANNELS = N_SPECTRAL_BANDS + N_DERIVED  # 17
+
+NODATA_LABEL = 255  # ignored by cross-entropy loss
 
 
 def set_seed(user_seed):
@@ -59,38 +71,32 @@ def check_data_split(train_path, reset=False):
 
 def split_data(h5_folder, stage_0_ratio=0.25, stages=4):
     """
-    Assign H5 files to different stages of the self-training pipeline.
-    Stage 0 gets stage_0_ratio of the data, the rest is split evenly
-    among stages 1–3.
+    Assign Zarr patch directories to different stages of the self-training pipeline.
+    Stage 0 gets stage_0_ratio of the data; the rest is split evenly among stages 1–3.
     """
-    h5_folder = os.path.abspath(h5_folder)
-    file_list = glob.glob(os.path.join(h5_folder, '*.h5'))
-    n_files = len(file_list)
+    h5_folder  = os.path.abspath(h5_folder)
+    file_list  = glob.glob(os.path.join(h5_folder, '*.zarr'))
+    n_files    = len(file_list)
     if not n_files:
-        raise FileNotFoundError(f'No h5 files found in {h5_folder}')
+        raise FileNotFoundError(f'No .zarr patches found in {h5_folder}')
 
-    # Full file list
-    train_list_filename = os.path.join(h5_folder, 'stage_full.txt')
-    with open(train_list_filename, 'w') as f:
-        for train_file in file_list:
-            f.write(f'{train_file}\n')
+    with open(os.path.join(h5_folder, 'stage_full.txt'), 'w') as f:
+        for p in file_list:
+            f.write(f'{p}\n')
 
     unlabelled_ratio = 1 - stage_0_ratio
-    unlabelled_size = int(n_files * unlabelled_ratio / (stages - 1))
-    labeled_size = n_files - (stages - 1) * unlabelled_size
+    unlabelled_size  = int(n_files * unlabelled_ratio / (stages - 1))
+    labeled_size     = n_files - (stages - 1) * unlabelled_size
 
     random.shuffle(file_list)
 
     start = 0
     for count in range(stages):
         stage_size = labeled_size if count == 0 else unlabelled_size
-        end = min(n_files, start + stage_size)
-        stage_list = file_list[start:end]
-
-        stage_filename = os.path.join(h5_folder, f'stage_{count}.txt')
-        with open(stage_filename, 'w') as f:
-            for train_file in stage_list:
-                f.write(f'{train_file}\n')
+        end        = min(n_files, start + stage_size)
+        with open(os.path.join(h5_folder, f'stage_{count}.txt'), 'w') as f:
+            for p in file_list[start:end]:
+                f.write(f'{p}\n')
         start = end
 
 
@@ -107,7 +113,7 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
     stage : int
         Self-training stage (0–3).
     path : str
-        Path to the H5 directory.
+        Path to the Zarr patch directory.
     full : bool
         If True, use all data (supervised mode).
     aug : bool
@@ -116,12 +122,11 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
         Re-generate stage assignment files.
     """
     datasets = []
-    shuffle = True if mode == 'train' else False
+    shuffle  = (mode == 'train')
 
     if mode == 'train':
         if stage != 0 and reset:
-            logger.warning('Stage data reset only in stage 0. '
-                           'Setting reset_stage_data to False.')
+            logger.warning('Stage data reset only in stage 0. Setting reset to False.')
             reset = False
 
         if not check_data_split(path, reset=reset):
@@ -129,39 +134,32 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
 
         if full:
             file_path = os.path.join(path, 'stage_full.txt')
-            with open(file_path, 'r') as fl:
-                files_list = [line.rstrip() for line in fl.readlines()]
-                datasets.append(
-                    PatchDataset(mode, file_list=files_list, stage=0, aug=aug))
+            with open(file_path) as fl:
+                files_list = [line.rstrip() for line in fl]
+            datasets.append(PatchDataset(mode, file_list=files_list, stage=0, aug=aug))
             logger.info(f'Full train set size: {len(files_list)}')
         else:
             for i in range(stage + 1):
                 file_path = os.path.join(path, f'stage_{i}.txt')
-                with open(file_path, 'r') as fl:
-                    files_list = [line.rstrip() for line in fl.readlines()]
-
-                    stage_aug = bool(stage) if aug else aug
-
-                    datasets.append(
-                        PatchDataset(mode, file_list=files_list,
-                                     stage=i, aug=stage_aug))
+                with open(file_path) as fl:
+                    files_list = [line.rstrip() for line in fl]
+                stage_aug = bool(stage) if aug else aug
+                datasets.append(
+                    PatchDataset(mode, file_list=files_list, stage=i, aug=stage_aug))
                 logger.info(f'Stage {i} train set size: {len(files_list)}')
 
     elif mode == 'label_gen':
         for i in range(1, stage + 1):
             file_path = os.path.join(path, f'stage_{i}.txt')
-            with open(file_path, 'r') as fl:
-                files_list = [line.rstrip() for line in fl.readlines()]
-                datasets.append(
-                    PatchDataset(mode, file_list=files_list,
-                                 stage=i, aug=False))
+            with open(file_path) as fl:
+                files_list = [line.rstrip() for line in fl]
+            datasets.append(PatchDataset(mode, file_list=files_list, stage=i, aug=False))
 
     else:  # test / predict
-        files_list = glob.glob(os.path.join(path, '*.h5'))
+        files_list = glob.glob(os.path.join(path, '*.zarr'))
         if not files_list:
-            raise FileNotFoundError(f'H5 files not found in {path}')
-        datasets.append(
-            PatchDataset(mode, file_list=files_list, stage=stage, aug=False))
+            raise FileNotFoundError(f'No .zarr patches found in {path}')
+        datasets.append(PatchDataset(mode, file_list=files_list, stage=stage, aug=False))
 
     concat_dataset = ConcatDataset(datasets)
     dataloader = torch.utils.data.DataLoader(
@@ -175,20 +173,19 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
 
 class PatchDataset(Dataset):
     """
-    Loads Landsat 8 patches from HDF5 files.
+    Loads Landsat 8 patches from Zarr directories.
 
-    Data layout in each H5 file:
-        data[:, :, 0:N_BANDS]  → spectral bands
-        data[:, :, N_BANDS]    → QA_PIXEL labels (stage 0 training labels)
-        data[:, :, N_BANDS+2]  → pseudo-labels (stage 1+ training labels)
+    Returns a (input_tensor, label, filename) tuple where:
+        input_tensor : (17, H+2, W+2) float32
+        label        : (1,  H+2, W+2) int64  — 0/1 binary, 255=nodata (ignored)
     """
 
     def __init__(self, mode, file_list, stage=0, aug=False):
-        self.mode = mode
-        self.stage = stage
+        self.mode      = mode
+        self.stage     = stage
         self.file_list = file_list
-        self.size = len(self.file_list)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.size      = len(self.file_list)
+        self.device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.transforms = None
         if mode == 'train' and aug:
@@ -205,47 +202,46 @@ class PatchDataset(Dataset):
         return self.size
 
     def __getitem__(self, idx):
-        with h5py.File(self.file_list[idx], 'r') as hf:
-            spectral_image = hf.get('data')[:]
+        patch_path = self.file_list[idx]
+        store = zarr.open_group(patch_path, mode='r')
 
-        # Split into spectral bands and labels
-        labels = spectral_image[:, :, N_SPECTRAL_BANDS:].astype(np.uint8)
-        labels[labels < 0] = 0
+        # ── Spectral bands: normalise DN → TOA reflectance ─────────────
+        spectral = store['spectral'][:].astype(np.float32) / 10000.0  # (H, W, 8)
 
-        spectral_image = spectral_image[:, :, :N_SPECTRAL_BANDS].astype(np.float32)
+        # ── Precomputed derived features ────────────────────────────────
+        rgb   = store['rgb'][:]    # (H, W, 3)
+        hsv   = store['hsv'][:]    # (H, W, 3)
+        sobel = store['sobel'][:]  # (H, W, 3)
 
-        # Select which label channel to use based on training stage
+        # Full input: (H, W, 17) = spectral(8) + rgb(3) + hsv(3) + sobel(3)
+        full_input = np.concatenate([spectral, rgb, hsv, sobel], axis=-1)
+
+        # ── Labels ──────────────────────────────────────────────────────
         if self.mode == 'train':
             if self.stage == 0:
-                # Use QA_PIXEL labels (index 0 in labels array)
-                lbl_idx = 0
+                label = store['label'][:]
             else:
-                # Use pseudo-labels (index 2 in labels array)
-                lbl_idx = 2
-                if lbl_idx >= labels.shape[-1]:
+                if 'pseudo_label' not in store:
                     raise RuntimeError(
-                        f'Pseudo-labels not found for stage {self.stage}. '
-                        f'Run label_generation.py first.')
+                        f'pseudo_label not found in {patch_path} for stage '
+                        f'{self.stage}. Run label_generation.py first.')
+                label = store['pseudo_label'][:]
+        else:
+            label = store['label'][:]
 
-            labels = labels[:, :, lbl_idx][:, :, None]
+        label = label[:, :, None]  # (H, W, 1)
 
-        # Apply augmentation
+        # ── Augmentation ────────────────────────────────────────────────
         if self.mode == 'train' and self.transforms is not None:
-            transform_input = [spectral_image, labels]
-            transform_out = self.transforms(transform_input)
-            spectral_image, labels = transform_out[0], transform_out[1]
+            full_input, label = self.transforms([full_input, label])
 
-        # Padding (1 pixel border)
-        p2d = ((1, 1), (1, 1), (0, 0))
-        spectral_image = np.pad(spectral_image, p2d, 'constant',
-                                constant_values=0)
-        labels = np.pad(labels, p2d, 'constant', constant_values=0)
+        # ── Padding (1-pixel border) ─────────────────────────────────────
+        p2d        = ((1, 1), (1, 1), (0, 0))
+        full_input = np.pad(full_input, p2d, 'constant', constant_values=0)
+        label      = np.pad(label, p2d, 'constant', constant_values=NODATA_LABEL)
 
-        # Normalize reflectance values (DN to TOA reflectance scale)
-        spectral_image = spectral_image / 10000.0
+        # ── HWC → CHW ────────────────────────────────────────────────────
+        full_input = np.transpose(full_input, (2, 0, 1))          # (17, H+2, W+2)
+        label      = np.transpose(label, (2, 0, 1)).astype(np.int64)  # (1, H+2, W+2)
 
-        # Convert HWC → CHW
-        spectral_image = np.transpose(spectral_image, (2, 0, 1))
-        labels = np.transpose(labels, (2, 0, 1)).astype(np.int64)
-
-        return spectral_image, labels, self.file_list[idx]
+        return full_input, label, patch_path

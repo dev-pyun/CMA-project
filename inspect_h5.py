@@ -1,19 +1,19 @@
 """
-H5 Patch Inspector & Visualizer for Landsat 8 Cloud/Shadow/Snow Detection
+Zarr Patch Inspector & Visualizer for Landsat 8 Cloud Detection
 
 사용법:
     # 데이터 내용 출력 (텍스트)
-    python inspect_h5.py path/to/patch.h5
+    python inspect_h5.py path/to/patch.zarr
 
     # 시각화 이미지 저장
-    python inspect_h5.py path/to/patch.h5 --save
+    python inspect_h5.py path/to/patch.zarr --save
 
     # 여러 파일 랜덤 샘플링해서 저장
-    python inspect_h5.py path/to/TRAIN_H5/ --sample 9 --save
+    python inspect_h5.py path/to/TRAIN_ZARR/ --sample 9 --save
 
 예시:
-    python inspect_h5.py data/TRAIN_H5/LC08_L1GT_160109_20201126_20210316_02_T2_PATCH0.h5
-    python inspect_h5.py data/TRAIN_H5/ --sample 6 --save --out output_vis/
+    python inspect_h5.py data/TRAIN_ZARR/LC08_L1GT_160109_20201126_20210316_02_T2_PATCH0.zarr
+    python inspect_h5.py data/TRAIN_ZARR/ --sample 6 --save --out output_vis/
 """
 
 import argparse
@@ -22,202 +22,104 @@ import os
 import random
 import sys
 
-import h5py
 import numpy as np
+import zarr
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
-from matplotlib.gridspec import GridSpec
 
-# ──────────────────────────────────────────────
-# 상수 정의 (patch_dataset.py / qa_pixel_mapping.py 기준)
-# ──────────────────────────────────────────────
-N_SPECTRAL_BANDS = 8  # B1–B7 + B9 (Cirrus)
-
-BAND_NAMES = ['B1 (Coastal)', 'B2 (Blue)', 'B3 (Green)',
-              'B4 (Red)', 'B5 (NIR)', 'B6 (SWIR1)',
-              'B7 (SWIR2)', 'B9 (Cirrus)']
-
-CLASS_NAMES = {
-    0: 'No-Data',
-    1: 'Clear-Sky',
-    2: 'Cloud',
-    3: 'Shadow',
-    4: 'Snow/Ice',
-    5: 'Water',
+# ── 상수 ───────────────────────────────────────────────────────────────
+BINARY_CLASS_NAMES  = {0: 'No-Cloud', 1: 'Cloud', 255: 'No-Data'}
+BINARY_CLASS_COLORS = {
+    0:   (0.13, 0.55, 0.13),  # Green  – No-Cloud
+    1:   (1.0,  1.0,  1.0),   # White  – Cloud
+    255: (0.0,  0.0,  0.0),   # Black  – No-Data
 }
 
-# 클래스별 색상 (RGB 0~1)
-CLASS_COLORS = {
-    0: (0.0,  0.0,  0.0),   # Black  – No-Data
-    1: (0.13, 0.55, 0.13),  # Green  – Clear
-    2: (1.0,  1.0,  1.0),   # White  – Cloud
-    3: (0.5,  0.5,  0.5),   # Grey   – Shadow
-    4: (0.0,  1.0,  1.0),   # Cyan   – Snow/Ice
-    5: (0.0,  0.0,  1.0),   # Blue   – Water
-}
 
-NUM_CLASSES = 6
+# ── 로더 ───────────────────────────────────────────────────────────────
 
-# Colormap for label maps
-CMAP_LABEL = mcolors.ListedColormap([CLASS_COLORS[i] for i in range(NUM_CLASSES)])
-NORM_LABEL  = mcolors.BoundaryNorm(boundaries=range(NUM_CLASSES + 1), ncolors=NUM_CLASSES)
+def load_zarr(path: str) -> zarr.Group:
+    return zarr.open_group(path, mode='r')
 
 
-# ──────────────────────────────────────────────
-# 유틸 함수
-# ──────────────────────────────────────────────
-
-def load_h5(path: str) -> np.ndarray:
-    with h5py.File(path, 'r') as hf:
-        keys = list(hf.keys())
-        assert 'data' in keys, f"'data' key not found. Keys: {keys}"
-        data = hf['data'][:]
-    return data
-
-
-def print_h5_info(path: str, data: np.ndarray):
-    """텍스트로 H5 내용 요약 출력."""
-    print("=" * 60)
-    print(f"File : {os.path.basename(path)}")
-    print(f"Shape: {data.shape}  (H x W x C)")
-    print(f"dtype: {data.dtype}")
-    print(f"Size : {data.nbytes / 1024:.1f} KB")
+def print_zarr_info(path: str, store: zarr.Group):
+    """텍스트로 zarr 패치 내용 요약 출력."""
+    print('=' * 65)
+    print(f'Patch : {os.path.basename(path)}')
+    print(f'Arrays: {list(store.keys())}')
     print()
 
-    n_ch = data.shape[-1]
-    print(f"{'Channel':<6} {'Name':<20} {'min':>8} {'max':>8} {'mean':>8} {'nonzero':>10}")
-    print("-" * 62)
+    for key in store.keys():
+        arr = store[key][:]
+        print(f'  [{key}]  shape={arr.shape}  dtype={arr.dtype}  '
+              f'min={arr.min():.3f}  max={arr.max():.3f}  '
+              f'mean={arr.mean():.3f}')
 
-    for i in range(n_ch):
-        ch = data[:, :, i].astype(np.float32)
-        if i < N_SPECTRAL_BANDS:
-            name = BAND_NAMES[i]
-        elif i == N_SPECTRAL_BANDS:
-            name = 'QA_PIXEL label'
-        elif i == N_SPECTRAL_BANDS + 1:
-            name = 'Prediction (opt)'
-        elif i == N_SPECTRAL_BANDS + 2:
-            name = 'Pseudo-label'
-        else:
-            name = f'Unknown ch{i}'
+    # Label 분포
+    for label_key in ('label', 'pseudo_label'):
+        if label_key in store:
+            lbl = store[label_key][:]
+            total = lbl.size
+            print(f'\n  [{label_key}] 클래스 분포:')
+            for cls, name in sorted(BINARY_CLASS_NAMES.items()):
+                cnt = int((lbl == cls).sum())
+                pct = cnt / total * 100
+                bar = '█' * int(pct / 2)
+                print(f'    {cls:3d} {name:<10}: {cnt:>6} px ({pct:5.1f}%) {bar}')
 
-        nonzero = int(np.count_nonzero(ch))
-        total   = ch.size
-        print(f"  ch{i:<3} {name:<20} {ch.min():>8.1f} {ch.max():>8.1f} "
-              f"{ch.mean():>8.2f} {nonzero:>6}/{total}")
-
-    # 라벨 클래스 분포
-    if n_ch > N_SPECTRAL_BANDS:
-        print()
-        for label_idx, label_name in [(N_SPECTRAL_BANDS, 'QA_PIXEL'),
-                                       (N_SPECTRAL_BANDS + 2, 'Pseudo-label')]:
-            if label_idx < n_ch:
-                lbl = data[:, :, label_idx].astype(np.uint8)
-                total = lbl.size
-                print(f"  [{label_name}] 클래스 분포:")
-                for cls in range(NUM_CLASSES):
-                    cnt = int((lbl == cls).sum())
-                    pct = cnt / total * 100
-                    bar = '█' * int(pct / 2)
-                    print(f"    {cls} {CLASS_NAMES[cls]:<12}: {cnt:>6} px ({pct:5.1f}%) {bar}")
-    print("=" * 60)
+    print('=' * 65)
 
 
-def normalize_band(arr: np.ndarray, p_low=2, p_high=98) -> np.ndarray:
-    """퍼센타일 기반 정규화 (0~1)."""
-    lo = np.percentile(arr, p_low)
-    hi = np.percentile(arr, p_high)
-    if hi == lo:
-        return np.zeros_like(arr, dtype=np.float32)
-    return np.clip((arr.astype(np.float32) - lo) / (hi - lo), 0, 1)
-
-
-def make_rgb(data: np.ndarray) -> np.ndarray:
-    """B4(R), B3(G), B2(B) → True Color RGB."""
-    r = normalize_band(data[:, :, 3])  # B4
-    g = normalize_band(data[:, :, 2])  # B3
-    b = normalize_band(data[:, :, 1])  # B2
-    return np.stack([r, g, b], axis=-1)
-
-
-def make_false_color(data: np.ndarray) -> np.ndarray:
-    """B5(NIR), B4(R), B3(G) → False Color (vegetation)."""
-    r = normalize_band(data[:, :, 4])  # B5 NIR
-    g = normalize_band(data[:, :, 3])  # B4 Red
-    b = normalize_band(data[:, :, 2])  # B3 Green
-    return np.stack([r, g, b], axis=-1)
-
-
-def make_swir_composite(data: np.ndarray) -> np.ndarray:
-    """B6(SWIR1), B5(NIR), B4(R) → Snow 탐지용."""
-    r = normalize_band(data[:, :, 5])  # B6 SWIR1
-    g = normalize_band(data[:, :, 4])  # B5 NIR
-    b = normalize_band(data[:, :, 3])  # B4 Red
-    return np.stack([r, g, b], axis=-1)
-
-
-def compute_ndsi(data: np.ndarray) -> np.ndarray:
-    """NDSI = (B3 - B6) / (B3 + B6)."""
-    g  = data[:, :, 2].astype(np.float32)
-    s1 = data[:, :, 5].astype(np.float32)
-    denom = g + s1
-    denom[denom == 0] = 1e-6
-    return (g - s1) / denom
-
+# ── 유틸 함수 ──────────────────────────────────────────────────────────
 
 def label_to_rgb(lbl: np.ndarray) -> np.ndarray:
-    """라벨 맵 → RGB 이미지."""
     h, w = lbl.shape
-    rgb = np.zeros((h, w, 3), dtype=np.float32)
-    for cls, color in CLASS_COLORS.items():
-        mask = (lbl == cls)
-        rgb[mask] = color
+    rgb  = np.zeros((h, w, 3), dtype=np.float32)
+    for cls, color in BINARY_CLASS_COLORS.items():
+        rgb[lbl == cls] = color
     return rgb
 
 
 def make_legend_patches():
-    return [mpatches.Patch(color=CLASS_COLORS[c], label=CLASS_NAMES[c])
-            for c in range(NUM_CLASSES)]
+    return [mpatches.Patch(color=BINARY_CLASS_COLORS[c],
+                           label=BINARY_CLASS_NAMES[c])
+            for c in [0, 1, 255]]
 
 
-# ──────────────────────────────────────────────
-# 메인 시각화
-# ──────────────────────────────────────────────
+# ── 시각화 ─────────────────────────────────────────────────────────────
 
 def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
-    data = load_h5(path)
+    store = load_zarr(path)
+    print_zarr_info(path, store)
 
-    # 텍스트 출력
-    print_h5_info(path, data)
+    spectral = store['spectral'][:].astype(np.float32) / 10000.0  # (H,W,8)
+    rgb      = store['rgb'][:]     # (H,W,3) pre-normalised
+    hsv      = store['hsv'][:]     # (H,W,3)
+    sobel    = store['sobel'][:]   # (H,W,3)
+    label    = store['label'][:]   # (H,W)
 
-    n_ch = data.shape[-1]
-    has_pseudo = (n_ch > N_SPECTRAL_BANDS + 2)
+    has_pseudo = 'pseudo_label' in store
 
-    # ── 그림 레이아웃 구성 ──────────────────────────
-    n_cols = 4
     n_rows = 3 if has_pseudo else 2
-
+    n_cols = 4
     fig = plt.figure(figsize=(n_cols * 4, n_rows * 3.5), dpi=100)
     fig.patch.set_facecolor('#1a1a2e')
-    fig.suptitle(os.path.basename(path), color='white', fontsize=11, y=1.01)
+    fig.suptitle(os.path.basename(path), color='white', fontsize=10, y=1.01)
 
-    axes = []
-    for r in range(n_rows):
-        row = []
-        for c in range(n_cols):
-            ax = fig.add_subplot(n_rows, n_cols, r * n_cols + c + 1)
-            ax.set_facecolor('#16213e')
-            ax.tick_params(colors='#aaaaaa', labelsize=7)
-            for spine in ax.spines.values():
-                spine.set_edgecolor('#333355')
-            row.append(ax)
-        axes.append(row)
+    def _ax(row, col):
+        ax = fig.add_subplot(n_rows, n_cols, row * n_cols + col + 1)
+        ax.set_facecolor('#16213e')
+        ax.tick_params(colors='#aaaaaa', labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#333355')
+        return ax
 
     def show(ax, img, title, cmap=None, vmin=None, vmax=None, colorbar=False):
-        im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
+        im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax,
+                       interpolation='nearest')
         ax.set_title(title, color='#e0e0ff', fontsize=9, pad=4)
         ax.set_xticks([])
         ax.set_yticks([])
@@ -225,67 +127,67 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
             cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cb.ax.yaxis.set_tick_params(color='#aaaaaa', labelsize=7)
             plt.setp(cb.ax.yaxis.get_ticklabels(), color='#aaaaaa')
-        return im
 
-    # Row 0: 컬러 합성
-    show(axes[0][0], make_rgb(data),          'True Color (B4-B3-B2)')
-    show(axes[0][1], make_false_color(data),  'False Color (B5-B4-B3)')
-    show(axes[0][2], make_swir_composite(data),'SWIR Composite (B6-B5-B4)')
+    # Row 0: composites
+    show(_ax(0, 0), rgb,              'True Color (RGB)')
+    show(_ax(0, 1), hsv,              'HSV')
+    sobel_mag = sobel[:, :, 2]
+    vmax_s    = np.percentile(sobel_mag, 99) or 1.0
+    show(_ax(0, 2), sobel_mag, 'Sobel Magnitude', cmap='hot', vmin=0, vmax=vmax_s)
 
-    ndsi = compute_ndsi(data)
-    show(axes[0][3], ndsi, 'NDSI\n(Snow/Ice > 0.4)', cmap='RdBu_r', vmin=-1, vmax=1, colorbar=True)
+    # NDSI from spectral bands
+    g    = spectral[:, :, 2]
+    s1   = spectral[:, :, 5]
+    denom = g + s1
+    denom[denom == 0] = 1e-6
+    ndsi = (g - s1) / denom
+    show(_ax(0, 3), ndsi, 'NDSI (spectral)', cmap='RdBu_r', vmin=-1, vmax=1,
+         colorbar=True)
 
-    # Row 1: 스펙트럼 밴드 & 라벨
+    # Row 1: individual bands
     band_pairs = [(0, 'B1 Coastal'), (4, 'B5 NIR'), (6, 'B7 SWIR2'), (7, 'B9 Cirrus')]
     for col, (bi, bname) in enumerate(band_pairs):
-        arr = normalize_band(data[:, :, bi])
-        show(axes[1][col], arr, bname, cmap='gray')
+        band = spectral[:, :, bi]
+        lo, hi = np.percentile(band, 2), np.percentile(band, 98)
+        norm = np.clip((band - lo) / max(hi - lo, 1e-6), 0, 1) if hi > lo else band
+        show(_ax(1, col), norm, bname, cmap='gray')
 
-    # Row 2 (항상): QA_PIXEL 라벨
-    if n_ch > N_SPECTRAL_BANDS:
-        qa_lbl = data[:, :, N_SPECTRAL_BANDS].astype(np.uint8)
-        qa_rgb = label_to_rgb(qa_lbl)
-        show(axes[-1][0], qa_rgb, 'QA_PIXEL Label')
-        axes[-1][0].legend(handles=make_legend_patches(),
-                           loc='lower right', fontsize=6,
-                           facecolor='#0f0f23', labelcolor='white',
-                           framealpha=0.7, handlelength=1.0)
+    # Row 2: labels + stats
+    lbl_rgb = label_to_rgb(label)
+    ax_lbl  = _ax(2 if has_pseudo else 1, 0)  # re-use slot
+    ax_lbl  = _ax(n_rows - 1, 0)
+    show(ax_lbl, lbl_rgb, 'QA_PIXEL (binary)')
+    ax_lbl.legend(handles=make_legend_patches(), loc='lower right', fontsize=6,
+                  facecolor='#0f0f23', labelcolor='white',
+                  framealpha=0.7, handlelength=1.0)
 
-    # Pseudo-label (있을 때)
     if has_pseudo:
-        ps_lbl = data[:, :, N_SPECTRAL_BANDS + 2].astype(np.uint8)
-        ps_rgb = label_to_rgb(ps_lbl)
-        show(axes[-1][1], ps_rgb, 'Pseudo-label')
+        ps_lbl = store['pseudo_label'][:]
+        show(_ax(n_rows - 1, 1), label_to_rgb(ps_lbl), 'Pseudo-label')
 
-    # 클래스 픽셀 수 막대그래프
-    ax_bar = axes[-1][-2]
+    # Pixel count bar chart
+    ax_bar = _ax(n_rows - 1, 2)
     ax_bar.set_facecolor('#16213e')
-    if n_ch > N_SPECTRAL_BANDS:
-        lbl = data[:, :, N_SPECTRAL_BANDS].astype(np.uint8)
-        counts = [(lbl == c).sum() for c in range(NUM_CLASSES)]
-        colors_bar = [CLASS_COLORS[c] for c in range(NUM_CLASSES)]
-        bars = ax_bar.bar(range(NUM_CLASSES), counts, color=colors_bar, edgecolor='#333355')
-        ax_bar.set_xticks(range(NUM_CLASSES))
-        ax_bar.set_xticklabels([CLASS_NAMES[c][:5] for c in range(NUM_CLASSES)],
-                                rotation=30, fontsize=7, color='#aaaaaa')
-        ax_bar.set_title('Class Pixel Count\n(QA_PIXEL)', color='#e0e0ff', fontsize=9, pad=4)
-        ax_bar.tick_params(colors='#aaaaaa', labelsize=7)
-        ax_bar.set_facecolor('#16213e')
-        for spine in ax_bar.spines.values():
-            spine.set_edgecolor('#333355')
-        ax_bar.yaxis.label.set_color('#aaaaaa')
+    counts = [(label == c).sum() for c in [0, 1]]
+    colors_bar = [BINARY_CLASS_COLORS[c] for c in [0, 1]]
+    ax_bar.bar([0, 1], counts, color=colors_bar, edgecolor='#333355')
+    ax_bar.set_xticks([0, 1])
+    ax_bar.set_xticklabels(['No-Cloud', 'Cloud'], fontsize=8, color='#aaaaaa')
+    ax_bar.set_title('Class Pixel Count', color='#e0e0ff', fontsize=9, pad=4)
+    ax_bar.tick_params(colors='#aaaaaa', labelsize=7)
+    for spine in ax_bar.spines.values():
+        spine.set_edgecolor('#333355')
 
-    # 밴드별 평균값 라인 차트
-    ax_line = axes[-1][-1]
-    spectral = data[:, :, :N_SPECTRAL_BANDS].astype(np.float32)
-    band_means = spectral.mean(axis=(0, 1))
-    ax_line.plot(range(N_SPECTRAL_BANDS), band_means,
-                 color='#7ec8e3', marker='o', markersize=4, linewidth=1.5)
-    ax_line.set_xticks(range(N_SPECTRAL_BANDS))
+    # Spectral mean line
+    ax_line = _ax(n_rows - 1, 3)
+    ax_line.set_facecolor('#16213e')
+    means = spectral.mean(axis=(0, 1))
+    ax_line.plot(range(8), means, color='#7ec8e3', marker='o',
+                 markersize=4, linewidth=1.5)
+    ax_line.set_xticks(range(8))
     ax_line.set_xticklabels(['B1','B2','B3','B4','B5','B6','B7','B9'],
                              fontsize=7, color='#aaaaaa')
-    ax_line.set_title('Mean Spectral Values\n(raw DN)', color='#e0e0ff', fontsize=9, pad=4)
-    ax_line.set_facecolor('#16213e')
+    ax_line.set_title('Mean Spectral (TOA refl.)', color='#e0e0ff', fontsize=9, pad=4)
     ax_line.tick_params(colors='#aaaaaa', labelsize=7)
     for spine in ax_line.spines.values():
         spine.set_edgecolor('#333355')
@@ -298,38 +200,30 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
         out_path = os.path.join(out_dir, out_name)
         plt.savefig(out_path, dpi=120, bbox_inches='tight',
                     facecolor=fig.get_facecolor())
-        print(f"[saved] {out_path}")
+        print(f'[saved] {out_path}')
     else:
         plt.show()
 
     plt.close(fig)
 
 
-def visualize_multiple(h5_dir: str, n_samples: int, save: bool, out_dir: str):
-    """디렉토리에서 랜덤 샘플링해서 그리드 시각화."""
-    files = glob.glob(os.path.join(h5_dir, '*.h5'))
+def visualize_multiple(zarr_dir: str, n_samples: int, save: bool, out_dir: str):
+    files = glob.glob(os.path.join(zarr_dir, '*.zarr'))
     if not files:
-        print(f"H5 파일을 찾을 수 없습니다: {h5_dir}")
+        print(f'.zarr 패치를 찾을 수 없습니다: {zarr_dir}')
         sys.exit(1)
-
     sampled = random.sample(files, min(n_samples, len(files)))
-    print(f"\n{len(sampled)}개 파일 시각화 중...")
-
+    print(f'\n{len(sampled)}개 패치 시각화 중...')
     for f in sampled:
         visualize_patch(f, save=save, out_dir=out_dir)
 
 
-# ──────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(
-        description='Landsat H5 패치 내용 확인 및 시각화',
+        description='Landsat 8 Zarr 패치 내용 확인 및 시각화',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
-    parser.add_argument('path',
-                        help='H5 파일 경로 또는 H5 디렉토리 경로')
+    parser.add_argument('path', help='.zarr 패치 경로 또는 ZARR 디렉토리 경로')
     parser.add_argument('--save', action='store_true',
                         help='화면 출력 대신 PNG 파일로 저장')
     parser.add_argument('--out', default='vis_output',
@@ -341,11 +235,13 @@ def main():
     path = os.path.abspath(args.path)
 
     if os.path.isdir(path):
-        visualize_multiple(path, args.sample, args.save, args.out)
-    elif os.path.isfile(path):
-        visualize_patch(path, save=args.save, out_dir=args.out)
+        # 단일 .zarr 패치인지, 상위 디렉토리인지 구분
+        if os.path.exists(os.path.join(path, '.zgroup')):
+            visualize_patch(path, save=args.save, out_dir=args.out)
+        else:
+            visualize_multiple(path, args.sample, args.save, args.out)
     else:
-        print(f"경로가 없습니다: {path}")
+        print(f'경로가 없습니다: {path}')
         sys.exit(1)
 
 

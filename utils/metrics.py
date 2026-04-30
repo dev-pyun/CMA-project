@@ -110,8 +110,8 @@ def calculate_confusion_matrix(predicted, labels, mode=None,
 
 
 def calculate_accuracy(predicted, labels, mode=None):
-    """Pixel-level accuracy for a batch."""
-    mask = labels >= 0
+    """Pixel-level accuracy for a batch, excluding nodata pixels (label == 255)."""
+    mask = (labels >= 0) & (labels < 255)
     correct = (predicted[mask] == labels[mask]).float().sum()
-    total = mask.float().sum()
+    total   = mask.float().sum()
     return correct / total if total > 0 else torch.tensor(0.0)

@@ -9,8 +9,9 @@ import logging
 import os
 from shutil import copyfile
 
-import h5py
 import numpy as np
+import zarr
+from numcodecs import Blosc
 import torch
 import torch.nn.functional as F
 from torch.nn import DataParallel
@@ -29,7 +30,8 @@ logger = logging.getLogger(__name__)
 FILTER_OPTIONS = [16, 32, 24, 32]
 DEPTH_OPTIONS = [5, 5, 6, 6]
 
-NUM_CLASSES = 6
+NUM_CLASSES = 2   # binary: 0=no-cloud, 1=cloud  (255=nodata, ignored in loss)
+NODATA_LABEL = 255
 
 
 class Model:
@@ -73,7 +75,7 @@ class Model:
                 self.network.parameters(),
                 lr=self.exp.lr,
                 weight_decay=1e-5)
-            self.metrics = Metrics(self.device)
+            self.metrics = Metrics(self.device, num_classes=NUM_CLASSES)
 
             # Early stopping
             self.patience_counter = 0
@@ -84,7 +86,7 @@ class Model:
             trained_model = self.exp.get_trained_model_info()
             self.network.load_state_dict(trained_model['model_state_dict'])
 
-            self.metrics = Metrics(self.device)
+            self.metrics = Metrics(self.device, num_classes=NUM_CLASSES)
 
             if experiment.mode == 'label_gen':
                 self.stage_freq_data = []
@@ -104,12 +106,12 @@ class Model:
         else:
             # test/predict mode: use uniform weights (no MFB available)
             w = torch.ones(NUM_CLASSES, dtype=torch.float32).to(self.device)
-        loss = F.cross_entropy(output, labels, w)
+        loss = F.cross_entropy(output, labels, w, ignore_index=NODATA_LABEL)
 
         predicted_label = self.encode_label(output)
         if mode != 'train':
             self.metrics.val_confusion_matrix += calculate_confusion_matrix(
-                predicted_label, labels, mode)
+                predicted_label, labels, mode, num_classes=NUM_CLASSES)
         else:
             acc = calculate_accuracy(predicted_label, labels, mode).detach()
             self.metrics.add_step_info(mode, loss.detach(), acc)
@@ -172,7 +174,7 @@ class Model:
         predicted_labels = torch.argmax(softmax_out, dim=1)
         if label_gen:
             prob = torch.max(softmax_out, dim=1)[0]
-            predicted_labels[prob < threshold] = 0
+            predicted_labels[prob < threshold] = NODATA_LABEL
         return predicted_labels
 
     # ------------------------------------------------------------------
@@ -236,41 +238,35 @@ class Model:
         print_val_csv_metrics(best_epoch + 1, self.exp.log_path)
 
     # ------------------------------------------------------------------
-    # Pseudo-label generation (writes back into H5 files)
+    # Pseudo-label generation (writes back into Zarr patches)
     # ------------------------------------------------------------------
     def generate_train_data(self, filenames, labels, label_gen=True):
-        """Save model predictions into the HDF5 files for the next stage."""
-        n_bands = 8  # Spectral bands in H5: B1–B7 + B9
+        """Save model predictions into the Zarr patch directories."""
+        _compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
 
         for label, filename in zip(labels, filenames):
-            label_np = label.cpu().numpy().astype(np.uint16)
+            label_np = label.cpu().numpy().astype(np.uint8)
             label_np = label_np[1:-1, 1:-1]  # Remove padding
 
-            with h5py.File(filename, 'r') as hf:
-                data = hf.get('data')[:]
+            store = zarr.open_group(filename, mode='r+')
 
             if label_gen:
-                fmask = data[:, :, n_bands]  # QA_PIXEL labels channel
-                label_np[fmask == 0] = 0  # Preserve No-Data
-                target_index = n_bands + 2  # Pseudo-label channel
+                # Propagate nodata from the QA label
+                qa_label = store['label'][:]
+                label_np[qa_label == NODATA_LABEL] = NODATA_LABEL
+                target_key = 'pseudo_label'
 
-                new_label_freq = calculate_file_freq(label_np)
+                new_label_freq = calculate_file_freq(label_np, num_classes=NUM_CLASSES)
                 self.save_stats(filename, new_label_freq)
             else:
-                target_index = n_bands + 1  # Prediction channel
+                target_key = 'raw_prediction'
 
-            if data.shape[-1] < (target_index + 1):
-                new_shape = list(data.shape)
-                new_shape[-1] = (target_index + 1) - data.shape[-1]
-                data = np.append(data,
-                                 np.zeros(new_shape, dtype=np.uint16),
-                                 axis=-1)
-
-            data[:, :, target_index] = label_np
-
-            os.remove(filename)
-            with h5py.File(filename, 'w') as hf:
-                hf.create_dataset('data', data=data.astype(np.uint16))
+            if target_key in store:
+                store[target_key][:] = label_np
+            else:
+                store.create_dataset(target_key, data=label_np,
+                                     chunks=label_np.shape, dtype='uint8',
+                                     compressor=_compressor)
 
     def save_stats(self, filename, new_label_freq):
         row = [os.path.basename(filename)]
@@ -283,6 +279,6 @@ class Model:
             TRAIN_PATH,
             f"label_stats_stage{self.exp.config['stage'] + 1}.csv")
         with open(label_stats_file, 'w') as f:
-            f.write('FILENAME,NONE_F,CLEAR_F,CLOUD_F,SHADOW_F,ICE_F,WATER_F\n')
+            f.write('FILENAME,NOCLOUD_F,CLOUD_F\n')
             for i in self.stage_freq_data:
                 f.write(f'{i}\n')

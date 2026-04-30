@@ -1,5 +1,5 @@
 """
-Split Landsat 8 scenes (per-band TIF files) into fixed-size HDF5 patches
+Split Landsat 8 scenes (per-band TIF files) into fixed-size Zarr patches
 for network training.
 
 Landsat 8 data layout (per scene directory):
@@ -7,16 +7,12 @@ Landsat 8 data layout (per scene directory):
     *_QA_PIXEL.TIF                     (quality assessment)
     *_MTL.json                         (metadata)
 
-Output HDF5 layout  (256 × 256 patches):
-    data[:, :, 0]  → B1  (Coastal)
-    data[:, :, 1]  → B2  (Blue)
-    data[:, :, 2]  → B3  (Green)
-    data[:, :, 3]  → B4  (Red)
-    data[:, :, 4]  → B5  (NIR)
-    data[:, :, 5]  → B6  (SWIR1)
-    data[:, :, 6]  → B7  (SWIR2)
-    data[:, :, 7]  → B9  (Cirrus, zero-filled if absent in source)
-    data[:, :, 8]  → QA_PIXEL labels  (remapped to 0–5)
+Output Zarr layout  (256 × 256 patches, one .zarr directory per patch):
+    spectral  (H, W, 8)  uint16   — B1–B7, B9 raw DN values
+    rgb       (H, W, 3)  float32  — percentile-normalised R(B4), G(B3), B(B2) ∈ [0,1]
+    hsv       (H, W, 3)  float32  — H, S, V derived from rgb ∈ [0,1]
+    sobel     (H, W, 3)  float32  — Sobel X, Y, Magnitude on luminance
+    label     (H, W)     uint8    — binary: 0=no-cloud, 1=cloud, 255=no-data
 """
 
 import argparse
@@ -27,29 +23,35 @@ import random
 import warnings
 from tempfile import TemporaryDirectory
 
-import h5py
+import cv2
 import numpy as np
-from cv2 import resize, INTER_NEAREST, INTER_CUBIC
+import zarr
+from numcodecs import Blosc
 from tqdm import tqdm
 
 # Suppress PROJ database version warnings from rasterio
 warnings.filterwarnings('ignore', message='.*PROJ.*')
-os.environ['PROJ_LIB'] = ''  # Prevent PROJ from searching extra paths
+os.environ['PROJ_LIB'] = ''
 logging.getLogger('rasterio').setLevel(logging.ERROR)
 
 from rasterio import open as raster_open
 from rasterio import windows
 
-from utils.qa_pixel_mapping import qa_pixel_to_classes
+from utils.qa_pixel_mapping import qa_pixel_to_binary, BINARY_NODATA
 
 logger = logging.getLogger(__name__)
 
 # Required spectral bands — scene is skipped if any are missing
 REQUIRED_BANDS = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
 
-# All bands written to H5 (order = channel index); B9 is zero-filled if absent
+# All bands written to zarr (order = channel index); B9 is zero-filled if absent
 ALL_BANDS = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B9']
 N_SPECTRAL = len(ALL_BANDS)  # always 8
+
+# Zarr compressors
+_COMP_UINT16 = Blosc(cname='zstd', clevel=3, shuffle=Blosc.BITSHUFFLE)
+_COMP_F32    = Blosc(cname='zstd', clevel=3, shuffle=Blosc.SHUFFLE)
+_COMP_UINT8  = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
 
 
 def setup_logger():
@@ -61,12 +63,12 @@ def setup_logger():
 
 def get_args(argv=None):
     parser = argparse.ArgumentParser(
-        description='Split Landsat 8 scenes into HDF5 patches')
+        description='Split Landsat 8 scenes into Zarr patches')
     parser.add_argument('-p', '--path',
                         help='Path to folder containing scene directories',
                         default=None)
     parser.add_argument('-o', '--out_path',
-                        help='Explicit output path for HDF5 patches (overrides default)',
+                        help='Explicit output path for Zarr patches (overrides default)',
                         default=None)
     parser.add_argument('-m', '--mode', default='train',
                         choices=['train', 'test', 'predict'],
@@ -78,48 +80,112 @@ def get_args(argv=None):
     return parser.parse_args(argv)
 
 
+# ── Band / file helpers ────────────────────────────────────────────────
+
 def find_band_file(scene_dir, band_key):
     """Find the TIF file for a specific band in a scene directory."""
-    pattern = os.path.join(scene_dir, f'*_{band_key}.TIF')
-    matches = glob.glob(pattern)
-    if not matches:
-        # Try lowercase
-        pattern = os.path.join(scene_dir, f'*_{band_key}.tif')
-        matches = glob.glob(pattern)
-    return matches[0] if matches else None
+    for ext in ('TIF', 'tif'):
+        matches = glob.glob(os.path.join(scene_dir, f'*_{band_key}.{ext}'))
+        if matches:
+            return matches[0]
+    return None
 
 
 def find_qa_pixel_file(scene_dir):
     """Find the QA_PIXEL TIF file in a scene directory."""
-    pattern = os.path.join(scene_dir, '*_QA_PIXEL.TIF')
-    matches = glob.glob(pattern)
-    if not matches:
-        pattern = os.path.join(scene_dir, '*_QA_PIXEL.tif')
-        matches = glob.glob(pattern)
-    return matches[0] if matches else None
+    for ext in ('TIF', 'tif'):
+        matches = glob.glob(os.path.join(scene_dir, f'*_QA_PIXEL.{ext}'))
+        if matches:
+            return matches[0]
+    return None
 
 
-def read_band(filepath, window=None):
-    """Read a single band from a GeoTIFF file."""
-    with raster_open(filepath) as src:
-        data = src.read(1, window=window)
-        transform = src.transform if window is None else \
-            windows.transform(window, src.transform)
-        bounds = src.bounds
-    return data, transform, bounds
+# ── Derived feature computation ────────────────────────────────────────
 
+def _percentile_normalize(arr: np.ndarray, p_lo: int = 2, p_hi: int = 98) -> np.ndarray:
+    """Normalize a 2-D band to [0, 1] using percentile clipping."""
+    lo = float(np.percentile(arr, p_lo))
+    hi = float(np.percentile(arr, p_hi))
+    if hi <= lo:
+        return np.zeros_like(arr, dtype=np.float32)
+    return np.clip((arr.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
+
+
+def compute_rgb(spectral: np.ndarray) -> np.ndarray:
+    """Spectral (H,W,8) uint16 → percentile-normalised RGB float32 [0,1].
+
+    Channel mapping: R=B4 (ch3), G=B3 (ch2), B=B2 (ch1).
+    """
+    r = _percentile_normalize(spectral[:, :, 3])  # B4
+    g = _percentile_normalize(spectral[:, :, 2])  # B3
+    b = _percentile_normalize(spectral[:, :, 1])  # B2
+    return np.stack([r, g, b], axis=-1)
+
+
+def compute_hsv(rgb: np.ndarray) -> np.ndarray:
+    """RGB float32 [0,1] → HSV float32 [0,1].
+
+    OpenCV output: H∈[0,180], S∈[0,255], V∈[0,255] — normalised here.
+    """
+    rgb_u8 = (rgb * 255).astype(np.uint8)
+    hsv_u8 = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2HSV)
+    hsv = hsv_u8.astype(np.float32)
+    hsv[:, :, 0] /= 180.0
+    hsv[:, :, 1] /= 255.0
+    hsv[:, :, 2] /= 255.0
+    return hsv
+
+
+def compute_sobel(rgb: np.ndarray) -> np.ndarray:
+    """RGB float32 [0,1] → Sobel X, Y, Magnitude on luminance.
+
+    Returns (H, W, 3) float32: [Sobel_X, Sobel_Y, Sobel_Magnitude].
+    """
+    gray = (0.299 * rgb[:, :, 0]
+            + 0.587 * rgb[:, :, 1]
+            + 0.114 * rgb[:, :, 2]).astype(np.float32)
+    sx  = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sy  = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(sx ** 2 + sy ** 2)
+    return np.stack([sx, sy, mag], axis=-1)
+
+
+# ── Zarr I/O ───────────────────────────────────────────────────────────
+
+def save_patch_zarr(patch_path: str, spectral: np.ndarray, rgb: np.ndarray,
+                    hsv: np.ndarray, sobel: np.ndarray, label: np.ndarray):
+    """Persist one patch to a zarr directory store."""
+    store = zarr.open_group(patch_path, mode='w')
+    store.create_dataset('spectral', data=spectral,
+                         chunks=spectral.shape, dtype='uint16',
+                         compressor=_COMP_UINT16)
+    store.create_dataset('rgb', data=rgb,
+                         chunks=rgb.shape, dtype='float32',
+                         compressor=_COMP_F32)
+    store.create_dataset('hsv', data=hsv,
+                         chunks=hsv.shape, dtype='float32',
+                         compressor=_COMP_F32)
+    store.create_dataset('sobel', data=sobel,
+                         chunks=sobel.shape, dtype='float32',
+                         compressor=_COMP_F32)
+    store.create_dataset('label', data=label,
+                         chunks=label.shape, dtype='uint8',
+                         compressor=_COMP_UINT8)
+
+
+# ── Main splitting logic ───────────────────────────────────────────────
 
 def split_scene_to_patches(scene_dir, out_folder, mode='train',
                            patch_size=256, overlap=0):
     """
-    Split a single Landsat 8 scene into overlapping patches saved as HDF5.
+    Split a single Landsat 8 scene into overlapping patches saved as Zarr.
 
     Parameters
     ----------
     scene_dir : str
         Path to the scene directory containing per-band TIF files.
     out_folder : str
-        Output directory for HDF5 patch files.
+        Output directory for Zarr patch directories.
     mode : str
         'train', 'test', or 'predict'.
     patch_size : int
@@ -129,7 +195,7 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
     """
     scene_name = os.path.basename(scene_dir)
 
-    # Find required band files (B1–B7); scene is skipped if any are missing
+    # Find required band files; scene is skipped if any are missing
     band_files = {}
     for bk in REQUIRED_BANDS:
         bf = find_band_file(scene_dir, bk)
@@ -142,7 +208,7 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
         logger.error(f'  Missing core bands in {scene_name}, skipping scene.')
         return 0
 
-    # B9 (Cirrus): always attempted; zero-filled if absent
+    # B9 (Cirrus): zero-filled if absent
     b9_file = find_band_file(scene_dir, 'B9')
     if b9_file is not None:
         band_files['B9'] = b9_file
@@ -155,27 +221,20 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
         logger.error(f'  QA_PIXEL not found in {scene_name}, skipping (train mode).')
         return 0
 
-    # Read reference band (B5) to get dimensions and georef
-    ref_band_key = 'B5'
-    ref_path = band_files[ref_band_key]
-    with raster_open(ref_path) as ref:
+    # Reference dimensions from B5
+    with raster_open(band_files['B5']) as ref:
         img_height = ref.height
-        img_width = ref.width
+        img_width  = ref.width
 
-    # Always N_SPECTRAL (8) band channels + 1 QA_PIXEL label channel
-    n_channels = N_SPECTRAL + (1 if qa_file else 0)
-
-    # Compute patch grid
-    step = patch_size - overlap
+    step        = patch_size - overlap
     n_patches_y = max(1, (img_height - overlap) // step)
-    n_patches_x = max(1, (img_width - overlap) // step)
+    n_patches_x = max(1, (img_width  - overlap) // step)
     total_patches = n_patches_y * n_patches_x
 
     os.makedirs(out_folder, exist_ok=True)
-    n_saved = 0
+    n_saved   = 0
     n_skipped = 0
 
-    # Progress bar for patches within this scene
     patch_pbar = tqdm(
         total=total_patches,
         desc=f'  {scene_name[:40]}',
@@ -186,44 +245,46 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
 
     for iy in range(n_patches_y):
         for ix in range(n_patches_x):
-            row_start = min(iy * step, img_height - patch_size)
-            col_start = min(ix * step, img_width - patch_size)
-            row_start = max(0, row_start)
-            col_start = max(0, col_start)
-
+            row_start = max(0, min(iy * step, img_height - patch_size))
+            col_start = max(0, min(ix * step, img_width  - patch_size))
             win = windows.Window(col_start, row_start, patch_size, patch_size)
 
-            # Read all bands into a (H, W, C) array
-            patch_data = np.zeros((patch_size, patch_size, n_channels),
-                                 dtype=np.uint16)
-
+            # Read spectral bands → (H, W, 8) uint16
+            spectral = np.zeros((patch_size, patch_size, N_SPECTRAL), dtype=np.uint16)
             for ch, bk in enumerate(ALL_BANDS):
                 if bk not in band_files:
-                    continue  # zero-fill (already zeros from np.zeros)
+                    continue
                 with raster_open(band_files[bk]) as src:
                     data = src.read(1, window=win)
                 h, w = data.shape
-                patch_data[:h, :w, ch] = data
+                spectral[:h, :w, ch] = data
 
-            # QA_PIXEL → 6-class labels (always at channel N_SPECTRAL)
+            # QA_PIXEL → binary label
             if qa_file:
                 with raster_open(qa_file) as src:
                     qa_data = src.read(1, window=win)
                 h, w = qa_data.shape
-                labels = qa_pixel_to_classes(qa_data)
-                patch_data[:h, :w, N_SPECTRAL] = labels
+                qa_full = np.zeros((patch_size, patch_size), dtype=np.uint16)
+                qa_full[:h, :w] = qa_data
+                label = qa_pixel_to_binary(qa_full)
 
-                # Skip patches that contain ANY fill (no-data) pixel
-                if np.any(labels == 0):
+                # Skip patches with ANY no-data pixel
+                if np.any(label == BINARY_NODATA):
                     n_skipped += 1
                     patch_pbar.update(1)
                     continue
+            else:
+                label = np.zeros((patch_size, patch_size), dtype=np.uint8)
 
-            # Save as HDF5
-            patch_name = f'{scene_name}_PATCH{n_saved}.h5'
+            # Compute derived features
+            rgb   = compute_rgb(spectral)
+            hsv   = compute_hsv(rgb)
+            sobel = compute_sobel(rgb)
+
+            # Save as zarr
+            patch_name = f'{scene_name}_PATCH{n_saved}.zarr'
             patch_path = os.path.join(out_folder, patch_name)
-            with h5py.File(patch_path, 'w') as hf:
-                hf.create_dataset('data', data=patch_data)
+            save_patch_zarr(patch_path, spectral, rgb, hsv, sobel, label)
 
             n_saved += 1
             patch_pbar.update(1)
@@ -243,13 +304,10 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
     Each scene directory should contain per-band TIF files
     (e.g., LC08_..._B1.TIF, LC08_..._B2.TIF, ...).
     """
-    # Find scene directories: look for directories containing B1.TIF
     scene_dirs = []
-    # First check if current directory IS a scene (flat structure)
     if find_band_file(scene_parent_dir, 'B1') is not None:
         scene_dirs = [scene_parent_dir]
     else:
-        # Look for subdirectories containing band files
         for root, dirs, files in os.walk(scene_parent_dir):
             if find_band_file(root, 'B1') is not None:
                 scene_dirs.append(root)
@@ -261,20 +319,16 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
             f'Expected directories containing *_B1.TIF files.')
 
     total = len(scene_dirs)
-    print(f'\n=== Landsat 8 Scene Processor ===')
+    print(f'\n=== Landsat 8 Scene Processor (Zarr output) ===')
     print(f'Found {total} scene(s) to process')
     print(f'Patch size: {patch_size}x{patch_size}, Overlap: {overlap}')
     print(f'Output: {out_folder}')
-    print(f'Cirrus (B9): always included (zero-filled if absent)')
-    print(f'================================\n')
+    print(f'Label: binary (0=no-cloud, 1=cloud, 255=no-data)')
+    print(f'Derived features: RGB, HSV, Sobel (X/Y/Mag)')
+    print(f'================================================\n')
 
     total_patches = 0
-    scene_pbar = tqdm(
-        scene_dirs,
-        desc='Scenes',
-        unit='scene',
-        ncols=100,
-    )
+    scene_pbar = tqdm(scene_dirs, desc='Scenes', unit='scene', ncols=100)
 
     for scene_dir in scene_pbar:
         scene_name = os.path.basename(scene_dir)
@@ -298,21 +352,22 @@ if __name__ == '__main__':
 
     args = get_args()
 
-    from utils.dir_paths import TRAIN_SAFE_PATH, VALID_SAFE_PATH, PRED_PATH
+    from utils.dir_paths import TRAIN_ZARR_PATH, VALID_ZARR_PATH, PRED_PATH
     from utils.dir_paths import TRAIN_PATH, VALID_PATH
+    from utils.dir_paths import TRAIN_SAFE_PATH, VALID_SAFE_PATH
 
     if args.path is None:
         if args.mode == 'train':
             args.path = TRAIN_SAFE_PATH
-            out_path = TRAIN_PATH
+            out_path = TRAIN_ZARR_PATH
         elif args.mode == 'test':
             args.path = VALID_SAFE_PATH
-            out_path = VALID_PATH
+            out_path = VALID_ZARR_PATH
         elif args.mode == 'predict':
             args.path = PRED_PATH
-            out_path = args.path + '_H5'
+            out_path = args.path + '_ZARR'
     else:
-        out_path = args.path + '_H5'
+        out_path = args.path + '_ZARR'
 
     if getattr(args, 'out_path', None) is not None:
         out_path = args.out_path

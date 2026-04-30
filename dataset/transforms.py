@@ -53,8 +53,8 @@ class CutOut:
             cut_w = random.randint(int(w * 0.1), int(w * 0.3))
             y = random.randint(0, h - cut_h)
             x = random.randint(0, w - cut_w)
-            data[0][y:y + cut_h, x:x + cut_w, :] = 0
-            data[1][y:y + cut_h, x:x + cut_w, :] = 0
+            data[0][y:y + cut_h, x:x + cut_w, :] = 0    # zero out image
+            data[1][y:y + cut_h, x:x + cut_w, :] = 255  # ignore in loss
         return data
 
 
