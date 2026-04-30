@@ -39,7 +39,12 @@ class Model:
 
     def __init__(self, experiment, gpu_id):
         self.exp = experiment
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # DataParallel requires the model to live on device_ids[0].
+        # Use the first requested GPU as the primary device.
+        if torch.cuda.is_available() and gpu_id:
+            self.device = torch.device(f'cuda:{gpu_id[0]}')
+        else:
+            self.device = torch.device('cpu')
 
         self.inp_func = get_inp_func(self.exp.inp_mode)
         n_inp_channels = get_inp_channels(self.exp.inp_mode)
@@ -79,6 +84,8 @@ class Model:
             trained_model = self.exp.get_trained_model_info()
             self.network.load_state_dict(trained_model['model_state_dict'])
 
+            self.metrics = Metrics(self.device)
+
             if experiment.mode == 'label_gen':
                 self.stage_freq_data = []
 
@@ -92,7 +99,11 @@ class Model:
 
     def get_loss(self, output, labels, mode, fmask=None):
         labels = labels.to(self.device)
-        w = torch.from_numpy(self.exp.weights).float().to(self.device)
+        if self.exp.weights is not None:
+            w = torch.from_numpy(self.exp.weights).float().to(self.device)
+        else:
+            # test/predict mode: use uniform weights (no MFB available)
+            w = torch.ones(NUM_CLASSES, dtype=torch.float32).to(self.device)
         loss = F.cross_entropy(output, labels, w)
 
         predicted_label = self.encode_label(output)

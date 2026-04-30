@@ -65,6 +65,9 @@ def get_args(argv=None):
     parser.add_argument('-p', '--path',
                         help='Path to folder containing scene directories',
                         default=None)
+    parser.add_argument('-o', '--out_path',
+                        help='Explicit output path for HDF5 patches (overrides default)',
+                        default=None)
     parser.add_argument('-m', '--mode', default='train',
                         choices=['train', 'test', 'predict'],
                         help='Processing mode')
@@ -210,8 +213,8 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
                 labels = qa_pixel_to_classes(qa_data)
                 patch_data[:h, :w, N_SPECTRAL] = labels
 
-                # Skip patches that are entirely No-Data
-                if mode == 'train' and np.all(labels == 0):
+                # Skip patches that contain ANY fill (no-data) pixel
+                if np.any(labels == 0):
                     n_skipped += 1
                     patch_pbar.update(1)
                     continue
@@ -310,6 +313,9 @@ if __name__ == '__main__':
             out_path = args.path + '_H5'
     else:
         out_path = args.path + '_H5'
+
+    if getattr(args, 'out_path', None) is not None:
+        out_path = args.out_path
 
     make_patches(
         scene_parent_dir=os.path.abspath(args.path),

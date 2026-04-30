@@ -1,0 +1,67 @@
+nohup: ignoring input
+==============================================
+Self-Training Pipeline: trial_swirndsi_1
+Input Mode: swirndsi
+GPUs: 0
+==============================================
+
+>>> STAGE 0: Training on QA_PIXEL labels...
+2026-04-27 13:39:25,324 utils.experiment INFO Experiment: trial_swirndsi_1_stage0  Mode: train  Stage: 0
+2026-04-27 13:39:25,324 dataset.patch_dataset INFO Training without fixed seed
+2026-04-27 13:39:25,353 dataset.patch_dataset INFO Stage 0 train set size: 180
+2026-04-27 13:39:25,354 network.model INFO Stage 0: depth=5, filters=16
+2026-04-27 13:39:25,354 network.unet INFO UNet: in_channels=7, depth=5, start_filts=16, dropout=True
+2026-04-27 13:39:26,022 utils.MFB INFO Class frequencies: [0.0964 0.0001 0.     0.     0.8696 0.0339]
+2026-04-27 13:39:26,022 utils.MFB INFO MFB weights:       [6.7575e-01 1.0550e+03 6.5160e+08 6.5160e+08 7.4930e-02 1.9225e+00]
+2026-04-27 13:39:26,023 train_script INFO Epoch 1/400
+Train Epoch 1:   0%|          | 0/6 [00:00<?, ?it/s]                                                    Traceback (most recent call last):
+  File "/home/pyuncb/src/train.py", line 140, in <module>
+    model.train_step(network_input)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/home/pyuncb/src/network/model.py", line 148, in train_step
+    loss = self.valid_step(network_data, mode='train')
+  File "/home/pyuncb/src/network/model.py", line 121, in valid_step
+    output = self.forward_step(input_img)
+  File "/home/pyuncb/src/network/model.py", line 92, in forward_step
+    output = self.network(input_img.to(self.device))
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/parallel/data_parallel.py", line 192, in forward
+    return self.module(*inputs[0], **module_kwargs[0])
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/pyuncb/src/network/unet.py", line 187, in forward
+    x = decoder(double_conv_out, x)
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/pyuncb/src/network/unet.py", line 111, in forward
+    x = self.double_conv(x)
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/pyuncb/src/network/unet.py", line 48, in forward
+    x = self.dropout(x)
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/modules/dropout.py", line 176, in forward
+    return F.dropout2d(input, self.p, self.training, self.inplace)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/pyuncb/.conda/envs/remote/lib/python3.13/site-packages/torch/nn/functional.py", line 1549, in dropout2d
+    else _VF.feature_dropout(input, p, training)
+         ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 MiB. GPU 0 has a total capacity of 44.40 GiB of which 16.38 MiB is free. Process 3135279 has 42.47 GiB memory in use. Including non-PyTorch memory, this process has 1.88 GiB memory in use. Of the allocated memory 1.33 GiB is allocated by PyTorch, and 64.03 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

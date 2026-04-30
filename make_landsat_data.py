@@ -53,6 +53,9 @@ if __name__ == '__main__':
     else:
         out_path = args.path + '_H5'
 
+    if args.out_path is not None:
+        out_path = args.out_path
+
     make_patches(
         scene_parent_dir=os.path.abspath(args.path),
         out_folder=out_path,
