@@ -1,4 +1,10 @@
-/data
-/exp_data
+# Ignore large data directories
+/data/
+/exp_data/
+/results/
+
+# Ignore generated label and prepared files
 label_code/prepared/
 label_code/labels/
+
+*.pdf

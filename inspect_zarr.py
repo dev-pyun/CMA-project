@@ -1,19 +1,21 @@
 """
 Zarr Patch Inspector & Visualizer for Landsat 8 Cloud Detection
 
+한때 h5를 썼다보니...
+
 사용법:
     # 데이터 내용 출력 (텍스트)
-    python inspect_h5.py path/to/patch.zarr
+    python inspect_zarr.py path/to/patch.zarr
 
     # 시각화 이미지 저장
-    python inspect_h5.py path/to/patch.zarr --save
+    python inspect_zarr.py path/to/patch.zarr --save
 
     # 여러 파일 랜덤 샘플링해서 저장
-    python inspect_h5.py path/to/TRAIN_ZARR/ --sample 9 --save
+    python inspect_zarr.py path/to/TRAIN_ZARR/ --sample 9 --save
 
 예시:
-    python inspect_h5.py data/TRAIN_ZARR/LC08_L1GT_160109_20201126_20210316_02_T2_PATCH0.zarr
-    python inspect_h5.py data/TRAIN_ZARR/ --sample 6 --save --out output_vis/
+    python inspect_zarr.py data/TRAIN_ZARR/LC08_L1GT_160109_20201126_20210316_02_T2_PATCH0.zarr
+    python inspect_zarr.py data/TRAIN_ZARR/ --sample 6 --save --out output_vis/
 """
 
 import argparse
