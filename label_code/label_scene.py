@@ -6,28 +6,26 @@ napari 로 Landsat 씬 라벨링.
 출력  : labels/<scene_id>_labels.tif (uint8, GeoTIFF, CRS 보존)
             클래스:
                 0   = 미라벨 (napari 기본값, patch 저장 시 255(ignore)로 remap)
-                1   = clear land
-                2   = water
-                3   = snow / ice
-                4   = cloud shadow  (명확히 보이는 경우만)
-                5   = cloud  (opaque + thin cirrus + dilated 포함)
+                1   = water
+                2   = snow / ice
+                3   = cloud shadow  (명확히 보이는 경우만)
+                4   = cloud  (opaque + thin cirrus + dilated 포함)
                 255 = 센서 fill (자동 마킹)
 
             ※ 애매한 shadow / 경계 픽셀은 0(미라벨)으로 두면 ignore 처리됩니다.
 
 학습 파이프라인 remap (scene_to_patches.py):
-    {4, 5} → 1 (cloud)
-    {1, 2, 3} → 0 (no-cloud)
+    {3, 4} → 1 (cloud)
+    {1, 2} → 0 (no-cloud)
     {0, 255} → 255 (ignore)
 
 워크플로우:
   1. python label_scene.py --prepared_dir <prepared/scene_id>
   2. napari GUI 열림. 단축키:
-       5 키     : cloud (opaque + cirrus + dilated 모두)
-       4 키     : cloud shadow (명확한 경우만)
-       3 키     : snow / ice
-       2 키     : water
-       1 키     : clear land
+       4 키     : cloud (opaque + cirrus + dilated 모두)
+       3 키     : cloud shadow (명확한 경우만)
+       2 키     : snow / ice
+       1 키     : water
        0 키     : 미라벨로 초기화 (지우기)
        P 키     : Polygon mode (외곽선 클릭, 우클릭으로 종료)
        N 키     : Paint mode (브러시 칠하기)
@@ -57,15 +55,14 @@ import rasterio
 #       그림을 그리기 전 전체 픽셀이 0(미라벨)으로 시작. patch 저장 시 0 → 255(ignore) remap.
 LABEL_CLASSES = {
     0:   ("nodata",  "미라벨 — 그리지 않은 영역 (patch 저장 시 255로 remap)"),
-    1:   ("clear",   "clear land"),
-    2:   ("water",   "water"),
-    3:   ("snow",    "snow / ice"),
-    4:   ("shadow",  "cloud shadow (명확한 경우만; 애매하면 0으로 두기)"),
-    5:   ("cloud",   "cloud (opaque + thin cirrus + dilated 포함)"),
+    1:   ("water",   "water"),
+    2:   ("snow",    "snow / ice"),
+    3:   ("shadow",  "cloud shadow (명확한 경우만; 애매하면 0으로 두기)"),
+    4:   ("cloud",   "cloud (opaque + thin cirrus + dilated 포함)"),
     255: ("fill",    "센서 결손 fill — 항상 ignore"),
 }
 
-NUM_LABEL_CLASSES = 6  # 0~5 (255 제외)
+NUM_LABEL_CLASSES = 5  # 0~4 (255 제외)
 
 
 # %% [2] prepared 데이터 로드
@@ -114,16 +111,15 @@ def launch_napari(fci_rgb: np.ndarray, cfmask: np.ndarray, scene_id: str,
 
     labels_layer = viewer.add_labels(
         labels_arr,
-        name="MY_LABELS  (5=cloud  4=shadow  3=snow  2=water  1=clear  0=미라벨  255=fill)",
+        name="MY_LABELS  (4=cloud  3=shadow  2=snow  1=water  0=미라벨  255=fill)",
     )
 
     print("\n========================================")
     print("napari 라벨링 단축키:")
-    print("  5        : cloud  (opaque + cirrus + dilated 모두)")
-    print("  4        : cloud shadow  (명확한 경우만!)")
-    print("  3        : snow / ice")
-    print("  2        : water")
-    print("  1        : clear land")
+    print("  4        : cloud  (opaque + cirrus + dilated 모두)")
+    print("  3        : cloud shadow  (명확한 경우만!)")
+    print("  2        : snow / ice")
+    print("  1        : water")
     print("  0        : 미라벨로 초기화 (지우기)")
     print("  P        : Polygon mode  (좌클릭→꼭짓점, 우클릭→종료)")
     print("  N        : Paint mode  (브러시)")

@@ -12,11 +12,10 @@ napari GUI로 각 씬을 직접 라벨링하고, 256×256 patch로 분할해 검
 | Code | Class | 정의 | napari 키 |
 |------|-------|------|----------|
 | 0 | 미라벨 | 라벨링 안 한 영역 (napari 기본값) | `0` |
-| 1 | clear | Clear land | `1` |
-| 2 | water | Water | `2` |
-| 3 | snow | Snow / Ice | `3` |
-| 4 | shadow | Cloud shadow (**명확한 경우만**) | `4` |
-| 5 | cloud | Cloud (opaque + thin cirrus + dilated 포함) | `5` |
+| 1 | water | Water | `1` |
+| 2 | snow | Snow / Ice | `2` |
+| 3 | shadow | Cloud shadow (**명확한 경우만**) | `3` |
+| 4 | cloud | Cloud (opaque + thin cirrus + dilated 포함) | `4` |
 | 255 | fill | 센서 결손 (자동 마킹) | — |
 
 > **왜 0을 미라벨로?** napari 레이어 초기값이 0입니다. 0을 no-cloud로 쓰면 라벨링 전 전체 씬이 already labeled처럼 보이는 혼동이 생겨, 0을 미라벨(미작업)로 정의합니다.
@@ -27,11 +26,11 @@ napari GUI로 각 씬을 직접 라벨링하고, 256×256 patch로 분할해 검
 
 | 저장 값 | 의미 | 원본 클래스 | loss |
 |---------|------|-----------|------|
-| 0 | no-cloud | clear(1) + water(2) + snow(3) | 포함 |
-| 1 | cloud | shadow(4) + cloud(5) | 포함 |
+| 0 | no-cloud | water(1) + snow(2) | 포함 |
+| 1 | cloud | shadow(3) + cloud(4) | 포함 |
 | 255 | ignore | 미라벨(0) + fill(255) | **무시** (ignore_index=255) |
 
-remap 규칙: `{1,2,3}→0`, `{4,5}→1`, `{0,255}→255`
+remap 규칙: `{1,2}→0`, `{3,4}→1`, `{0,255}→255`
 
 ---
 
@@ -63,6 +62,11 @@ napari는 GUI 프로그램이므로 화면 출력이 필요합니다.
    ```bash
    echo $DISPLAY   # :0 또는 localhost:10.0 형태가 나와야 함
    ```
+
+Host Planck
+  HostName 147.46.93.100
+  User pyuncb
+  Port 22
 
 ---
 
@@ -99,11 +103,10 @@ python label_scene.py \
 
 | 키 | 동작 |
 |----|------|
-| `5` | cloud 칠하기 (opaque + cirrus + dilated 모두) |
-| `4` | cloud shadow 칠하기 (**명확한 경우만**) |
-| `3` | snow / ice 칠하기 |
-| `2` | water 칠하기 |
-| `1` | clear land 칠하기 |
+| `4` | cloud 칠하기 (opaque + cirrus + dilated 모두) |
+| `3` | cloud shadow 칠하기 (**명확한 경우만**) |
+| `2` | snow / ice 칠하기 |
+| `1` | water 칠하기 |
 | `0` | 미라벨로 초기화 (지우기) |
 | `P` | Polygon mode (좌클릭→꼭짓점, 우클릭→종료) |
 | `N` | Paint mode (브러시) |
@@ -122,11 +125,10 @@ python label_scene.py \
 ```
 [통계]
     0  nodata  : 45.23%   ← 미라벨 (라벨링 안 한 영역)
-    1  clear   :  8.11%
-    2  water   : 12.50%
-    3  snow    : 15.20%
-    4  shadow  :  2.30%
-    5  cloud   : 16.41%
+    1  water   : 12.50%
+    2  snow    : 15.20%
+    3  shadow  :  2.30%
+    4  cloud   : 24.52%
   255  fill    :  0.25%
 ```
 

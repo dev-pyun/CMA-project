@@ -221,5 +221,32 @@ python train.py -e my_exp -st 0 -ip all_derived -gpu 0
 
 **`README.md`**:
 - Label Scheme 섹션: 학습 파이프라인 scheme + 수동 라벨링 scheme + remap 규칙
-- "Validation 수동 라벨링" 섹션 napari 단축키 업데이트 (5/4/3/2/1/0)
+- "Validation 수동 라벨링" 섹션 napari 단축키 업데이트
 - "GitHub 토큰 발급 및 push 설정" 섹션 추가
+
+---
+
+## [2026-05-04] label_code clear land 클래스 제거
+
+### 변경 이유
+Weddell Sea 극지방 씬에서 clear land(노출 암석)가 거의 등장하지 않아 실질적으로 사용되지 않음. 불필요한 클래스 제거.
+
+### 최종 scheme
+
+**napari 라벨링:**
+```
+0 = 미라벨, 1 = water, 2 = snow/ice, 3 = shadow, 4 = cloud, 255 = fill
+```
+
+**remap (scene_to_patches.py):**
+```
+{1, 2} → 0 (no-cloud)
+{3, 4} → 1 (cloud)
+{0, 255} → 255 (ignore)
+```
+
+### 수정 파일
+- `label_code/label_scene.py`: LABEL_CLASSES, 레이어 이름, 단축키 안내
+- `label_code/scene_to_patches.py`: LABEL_REMAP, VALID_LABEL_VALUES, attrs, 통계 출력, docstring
+- `label_code/README.md`: 클래스 표, 단축키 표, 통계 예시
+- `README.md`: 수동 라벨링 scheme 표, 단축키 표

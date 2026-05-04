@@ -5,19 +5,18 @@
         labels/<scene_id>_labels.tif   (H, W) uint8
             label_scene.py 출력 scheme:
                 0   = 미라벨 (napari 기본값)
-                1   = clear land
-                2   = water
-                3   = snow / ice
-                4   = cloud shadow
-                5   = cloud (opaque + cirrus + dilated)
+                1   = water
+                2   = snow / ice
+                3   = cloud shadow
+                4   = cloud (opaque + cirrus + dilated)
                 255 = 센서 fill
 
 출력  : patches/<split>/<scene_id>_p{i:05d}_{j:05d}.h5
             /input  (8, 256, 256) float32
             /label  (256, 256)    uint8
                 remap 후:
-                    0   = no-cloud  (원본 1/2/3)
-                    1   = cloud     (원본 4/5)
+                    0   = no-cloud  (원본 1/2)
+                    1   = cloud     (원본 3/4)
                     255 = ignore    (원본 0/255)
             attrs   : scene_id, row/col, valid_label_frac,
                       has_cloud, has_shadow, has_snow, has_water, cloud_frac, ...
@@ -46,21 +45,20 @@ from tqdm import tqdm
 
 
 # label_scene.py 출력 → 학습 파이프라인 binary 형식
-# {shadow(4), cloud(5)} → 1(cloud)
-# {clear(1), water(2), snow(3)} → 0(no-cloud)
+# {shadow(3), cloud(4)} → 1(cloud)
+# {water(1), snow(2)} → 0(no-cloud)
 # {nodata(0), fill(255)} → 255(ignore)
 LABEL_REMAP = {
     0:   255,
     1:   0,
     2:   0,
-    3:   0,
+    3:   1,
     4:   1,
-    5:   1,
     255: 255,
 }
 
 # 유효 라벨로 인정되는 원본 값 (미라벨·fill 제외)
-VALID_LABEL_VALUES = {1, 2, 3, 4, 5}
+VALID_LABEL_VALUES = {1, 2, 3, 4}
 
 
 def remap_labels(labels: np.ndarray) -> np.ndarray:
@@ -105,7 +103,7 @@ def split_into_patches(
                 n_skipped += 1
                 continue
 
-            # 유효 라벨: 1~5 (미라벨 0 · fill 255 제외)
+            # 유효 라벨: 1~4 (미라벨 0 · fill 255 제외)
             valid_mask = np.isin(lr, list(VALID_LABEL_VALUES))
             valid_frac = valid_mask.mean()
 
@@ -114,16 +112,14 @@ def split_into_patches(
                 "col_start":          int(j),
                 "fill_frac":          float(fill_frac),
                 "valid_label_frac":   float(valid_frac),
-                "has_cloud":          bool((lr == 5).any()),
-                "has_shadow":         bool((lr == 4).any()),
-                "has_snow":           bool((lr == 3).any()),
-                "has_water":          bool((lr == 2).any()),
-                "has_clear":          bool((lr == 1).any()),
-                "cloud_frac":         float((lr == 5).mean()),
-                "shadow_frac":        float((lr == 4).mean()),
-                "snow_frac":          float((lr == 3).mean()),
-                "water_frac":         float((lr == 2).mean()),
-                "clear_frac":         float((lr == 1).mean()),
+                "has_cloud":          bool((lr == 4).any()),
+                "has_shadow":         bool((lr == 3).any()),
+                "has_snow":           bool((lr == 2).any()),
+                "has_water":          bool((lr == 1).any()),
+                "cloud_frac":         float((lr == 4).mean()),
+                "shadow_frac":        float((lr == 3).mean()),
+                "snow_frac":          float((lr == 2).mean()),
+                "water_frac":         float((lr == 1).mean()),
                 "cfmask_cloud_frac":  float((cf == 1).mean()),
                 "cfmask_shadow_frac": float((cf == 2).mean()),
                 "cfmask_snow_frac":   float((cf == 3).mean()),
@@ -184,7 +180,7 @@ def process_scene(
         labels_raw = src.read(1).astype(np.uint8)
 
     print(f"  labels 원본 통계:")
-    names = {0:"미라벨", 1:"clear", 2:"water", 3:"snow", 4:"shadow", 5:"cloud", 255:"fill"}
+    names = {0:"미라벨", 1:"water", 2:"snow", 3:"shadow", 4:"cloud", 255:"fill"}
     for v, name in names.items():
         pct = (labels_raw == v).mean() * 100
         if pct > 0:
@@ -202,7 +198,7 @@ def process_scene(
         saved[split] += 1
 
     print(f"\n[저장 완료]")
-    print(f"  remap: {{1,2,3}}→0(no-cloud)  {{4,5}}→1(cloud)  {{0,255}}→255(ignore)")
+    print(f"  remap: {{1,2}}→0(no-cloud)  {{3,4}}→1(cloud)  {{0,255}}→255(ignore)")
     for k, v in saved.items():
         print(f"  {k}: {v} patches → {out_root / k}")
     print(f"  총 {sum(saved.values())} patches\n")

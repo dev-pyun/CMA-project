@@ -55,14 +55,13 @@ src/
 | 값 | 의미 | napari 키 |
 |----|------|----------|
 | 0  | 미라벨 (patch 저장 시 255로 remap) | `0` |
-| 1  | clear land | `1` |
-| 2  | water | `2` |
-| 3  | snow / ice | `3` |
-| 4  | cloud shadow (**명확한 경우만**) | `4` |
-| 5  | cloud (opaque + cirrus + dilated) | `5` |
+| 1  | water | `1` |
+| 2  | snow / ice | `2` |
+| 3  | cloud shadow (**명확한 경우만**) | `3` |
+| 4  | cloud (opaque + cirrus + dilated) | `4` |
 | 255 | 센서 fill (자동 마킹) | — |
 
-remap 규칙 (scene_to_patches.py): `{1,2,3}→0`, `{4,5}→1`, `{0,255}→255`
+remap 규칙 (scene_to_patches.py): `{1,2}→0`, `{3,4}→1`, `{0,255}→255`
 
 ---
 
@@ -152,8 +151,10 @@ python scene_to_patches.py \
 
 | 키 | 동작 |
 |----|------|
-| `2` | cloud 칠하기 |
-| `1` | no-cloud 칠하기 |
+| `4` | cloud 칠하기 |
+| `3` | shadow 칠하기 (명확한 경우만) |
+| `2` | snow / ice 칠하기 |
+| `1` | water 칠하기 |
 | `0` | 미라벨로 지우기 |
 | `P` | Polygon mode |
 | `N` | Paint mode (브러시) |
