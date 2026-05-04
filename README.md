@@ -30,7 +30,7 @@ src/
 │   ├── metrics.py        # Accuracy / IoU 계산
 │   ├── csv_logger.py     # 학습 메트릭 CSV 저장
 │   └── join_predictions.py  # 예측 후처리
-├── label_code/           # napari 기반 수동 라벨링 도구
+├── label_code/           # napari 기반 수동 라벨링 도구 (label_code/README.md 참고)
 ├── data/
 │   ├── TRAIN_ZARR/       # 학습용 Zarr 패치 (256×256)
 │   └── VALIDATION_ZARR/  # 검증용 Zarr 패치
@@ -42,12 +42,27 @@ src/
   - 구조: `{year}/{month}/{date}/{scene_id}/` (예: `2020/01/20200101/LC08_L1GT_.../`)
   - 데이터 복사 없이 직접 읽어 Zarr 패치 생성
 
-## Label Scheme (Binary)
-| 값 | 의미 |
-|----|------|
-| 0  | No-Cloud (Clear / Snow / Water) |
-| 1  | Cloud (Cloud + Shadow + Cirrus + Dilated) |
-| 255 | No-Data (ignore_index) |
+## Label Scheme
+
+### 학습 파이프라인 / Zarr patch 저장 형식 (QA_PIXEL 자동 생성)
+| 값 | 의미 | loss |
+|----|------|------|
+| 0  | No-Cloud (Clear / Snow / Water) | 포함 |
+| 1  | Cloud (Cloud + Shadow + Cirrus + Dilated) | 포함 |
+| 255 | No-Data / ignore | **무시** (ignore_index=255) |
+
+### 수동 라벨링 (napari, label_scene.py 출력)
+| 값 | 의미 | napari 키 |
+|----|------|----------|
+| 0  | 미라벨 (patch 저장 시 255로 remap) | `0` |
+| 1  | clear land | `1` |
+| 2  | water | `2` |
+| 3  | snow / ice | `3` |
+| 4  | cloud shadow (**명확한 경우만**) | `4` |
+| 5  | cloud (opaque + cirrus + dilated) | `5` |
+| 255 | 센서 fill (자동 마킹) | — |
+
+remap 규칙 (scene_to_patches.py): `{1,2,3}→0`, `{4,5}→1`, `{0,255}→255`
 
 ---
 
@@ -57,26 +72,23 @@ src/
 
 ### 스크립트 실행 방법
 
-**기본 데이터 경로를 사용하는 경우**:
 ```bash
 # 학습용(Train) 데이터 패치 생성
 python make_landsat_data.py --mode train
 
 # 검증용(Validation) 데이터 패치 생성
 python make_landsat_data.py --mode test
-```
 
-**커스텀 데이터 경로를 사용하는 경우**:
-```bash
+# 커스텀 경로 지정
 python make_landsat_data.py --mode train --path /path/to/your/landsat/scenes
 ```
 
-> **참고**: 원본 씬 폴더에는 `*_B1.TIF` ~ `*_B7.TIF` 및 라벨용 `*_QA_PIXEL.TIF`가 필수적으로 있어야 합니다. `*_B9.TIF`(Cirrus 밴드)는 선택 사항이며, 없을 경우 0으로 자동 채워집니다.
+> **참고**: 원본 씬 폴더에는 `*_B1.TIF` ~ `*_B7.TIF` 및 `*_QA_PIXEL.TIF`가 필수입니다. `*_B9.TIF`(Cirrus)는 선택 사항이며, 없으면 0으로 채워집니다.
 
 ### Zarr Patch Format
 ```
-spectral/    → B1–B7 + B9 (uint16, shape H×W×8)
-rgb/         → OpenCV RGB, 퍼센타일 정규화 (float32, H×W×3)
+spectral/    → B1–B7 + B9 (uint16, H×W×8)
+rgb/         → OpenCV RGB 퍼센타일 정규화 (float32, H×W×3)
 hsv/         → OpenCV HSV (float32, H×W×3)
 sobel/       → Sobel X / Y / Magnitude (float32, H×W×3)
 qa_label/    → 바이너리 라벨 0/1/255 (uint8, H×W)
@@ -86,8 +98,6 @@ qa_label/    → 바이너리 라벨 0/1/255 (uint8, H×W)
 
 ## 2. 모델 학습 방법
 
-데이터 생성이 완료되면 4-Stage Self-Training 파이프라인을 구동합니다.
-
 ### 전체 파이프라인 일괄 실행 (`pipeline.sh`)
 
 ```bash
@@ -96,28 +106,67 @@ qa_label/    → 바이너리 라벨 0/1/255 (uint8, H×W)
 
 **실행 예시:**
 ```bash
-# 실험명 weddell_exp1, 입력모드 swirndsi (기본값)로 GPU 0번과 1번 사용
 ./pipeline.sh weddell_exp1 "swirndsi" "0 1"
-
-# 실험명 exp2, all_derived 모드로 GPU 0번 사용
 ./pipeline.sh exp2 "all_derived" "0"
 ```
 
-> Stage 0 (QA 바이너리 라벨 학습)부터 Stage 3 (가장 큰 네트워크)까지 pseudo-label 생성과 학습이 순차적으로 자동 진행됩니다.
+> Stage 0 (QA 바이너리 라벨) → Stage 3 (가장 큰 네트워크)까지 pseudo-label 생성과 학습이 순차 진행됩니다.
 
 ### 수동 실행 예시
 ```bash
-# stage 0 학습
 python train.py -e my_experiment -st 0 -ip swirndsi -gpu 0
-
-# pseudo-label 생성 후 다음 stage 학습
 python label_generation.py -e my_experiment -st 0
 python train.py -e my_experiment -st 1 -ip swirndsi -gpu 0
 ```
 
 ---
 
-## 3. 주요 조작 파라미터 (`train.py`)
+## 3. Validation 수동 라벨링
+
+학습된 모델의 정량 평가를 위해 napari GUI로 직접 라벨을 만드는 방법입니다.
+자세한 내용은 [label_code/README.md](label_code/README.md)를 참고하세요.
+
+### 빠른 시작
+
+```bash
+cd /home/pyuncb/src/label_code
+conda activate cloud_label   # 또는 cloud
+
+# Step 1. 씬 준비 (FCI / CFMask / bands 생성, ~5분)
+python prepare_scene.py \
+    --scene_dir /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea/2020/11/20201114/LC08_L1GT_188114_20201114_20210315_02_T2 \
+    --out_dir   prepared/
+
+# Step 2. napari GUI 라벨링 (MobaXterm X11 포워딩 필요)
+python label_scene.py \
+    --prepared_dir prepared/LC08_L1GT_188114_20201114_20210315_02_T2
+
+# Step 3. 256×256 patch 분할
+python scene_to_patches.py \
+    --prepared_dir prepared/LC08_L1GT_188114_20201114_20210315_02_T2 \
+    --label_path   labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \
+    --out_root     patches/
+```
+
+**napari 단축키:**
+
+| 키 | 동작 |
+|----|------|
+| `2` | cloud 칠하기 |
+| `1` | no-cloud 칠하기 |
+| `0` | 미라벨로 지우기 |
+| `P` | Polygon mode |
+| `N` | Paint mode (브러시) |
+| `E` | Erase |
+
+**GUI 실행 환경 (Windows):**
+MobaXterm으로 SSH 접속 시 X11 포워딩이 자동으로 활성화됩니다.
+- MobaXterm 다운로드: https://mobaxterm.mobatek.net/download.html
+- 접속 후 `echo $DISPLAY` 로 `:0` 또는 `localhost:10.0` 확인
+
+---
+
+## 4. 주요 조작 파라미터 (`train.py`)
 
 ### A. 입력 모드 (`-ip` / `--inp_mode`)
 
@@ -130,11 +179,6 @@ python train.py -e my_experiment -st 1 -ip swirndsi -gpu 0
 | `cirrus_ndsi` | B2–B7 + B9 + NDSI (8ch) |
 | `all_cirrus` | B1–B7 + B9 (8ch) |
 | `rgb` | B2–B4 (3ch) |
-
-커스텀 조합:
-```bash
-python train.py --inp_mode custom --bands B2 B3 B4 B5 B6 --indices NDSI NDWI
-```
 
 ### B. 학습 하이퍼파라미터
 
@@ -154,10 +198,8 @@ python train.py --inp_mode custom --bands B2 B3 B4 B5 B6 --indices NDSI NDWI
 | `--full` | 가장 큰 네트워크로 단일 지도학습 |
 
 ### D. 하드웨어
-
 ```bash
-# 다중 GPU 사용 예시 (DataParallel)
-python train.py -e my_exp -st 0 -ip swirndsi -gpu 0 1
+python train.py -e my_exp -st 0 -ip swirndsi -gpu 0 1   # 다중 GPU
 ```
 
 ---
@@ -170,3 +212,41 @@ python train.py -e my_exp -st 0 -ip swirndsi -gpu 0 1
 | 1 | depth=5, filters=32 | pseudo-label | stage_0+1.txt |
 | 2 | depth=6, filters=24 | pseudo-label | stage_0+1+2.txt |
 | 3 | depth=6, filters=32 | pseudo-label | 전체 |
+
+---
+
+## GitHub 토큰 발급 및 push 설정
+
+GitHub에 코드를 push할 때 HTTPS 인증이 필요합니다. 비밀번호 대신 Personal Access Token(PAT)을 사용합니다.
+
+### 토큰 발급 방법
+
+1. GitHub 로그인 → 우측 상단 프로필 → **Settings**
+2. 좌측 메뉴 하단 → **Developer settings**
+3. **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)**
+4. Note에 이름 입력 (예: `planck-server`)
+5. Expiration 설정 (90일 권장)
+6. Scope 체크:
+   - `repo` (전체 체크)
+7. **Generate token** 클릭 → 토큰 복사 (이 창 닫으면 다시 볼 수 없음!)
+
+### 서버에 토큰 등록
+
+```bash
+# 방법 1: remote URL에 토큰 포함 (간단, 보안 주의)
+git remote set-url origin https://<TOKEN>@github.com/dev-pyun/CMA-project.git
+
+# 방법 2: credential helper로 캐싱 (권장)
+git config --global credential.helper store
+git push origin main
+# → Username: dev-pyun
+# → Password: <TOKEN> 입력
+# 이후 자동 저장됨
+```
+
+### 토큰 만료 시
+
+```bash
+# 새 토큰 발급 후 다시 등록
+git remote set-url origin https://<NEW_TOKEN>@github.com/dev-pyun/CMA-project.git
+```

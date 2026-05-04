@@ -161,3 +161,65 @@ python train.py -e my_exp -st 0 -ip all_derived -gpu 0
 | 8–10 | RGB_R, RGB_G, RGB_B | zarr rgb 배열 |
 | 11–13 | HSV_H, HSV_S, HSV_V | zarr hsv 배열 |
 | 14–16 | Sobel_X, Sobel_Y, Sobel_Mag | zarr sobel 배열 |
+
+---
+
+## [2026-05-04] label_code 라벨 scheme 변경 — 6-class 수동 라벨 + binary remap
+
+### 변경 이유
+- napari 초기값이 0이므로, 0을 no-cloud로 쓰면 라벨링 전 전체 씬이 이미 labeled된 것처럼 보이는 혼동 발생
+- 수동 라벨을 **6-class**로 세분화해 에러 분석 및 클래스별 성능 진단 가능하게 함
+- Shadow는 cloud와 스펙트럼이 정반대(dark vs bright)이므로 분리 라벨링이 학습에 유리
+- Cirrus는 시각적 구분이 어렵고 cloud와 같은 목적(masking)이므로 cloud(5)에 통합
+- 학습 파이프라인은 그대로 binary (0=no-cloud, 1=cloud) 유지, remap은 patch 생성 시 처리
+
+### 라벨 scheme
+
+**napari 라벨링 (label_scene.py 출력):**
+```
+0   = 미라벨 (napari 기본값) → patch 저장 시 255(ignore)로 remap
+1   = clear land
+2   = water
+3   = snow / ice
+4   = cloud shadow  (명확한 경우만; 애매하면 0으로 두기)
+5   = cloud (opaque + thin cirrus + dilated 포함)
+255 = 센서 fill (자동 마킹)
+```
+
+**remap 규칙 (scene_to_patches.py):**
+```
+{1, 2, 3} → 0  (no-cloud)
+{4, 5}    → 1  (cloud)
+{0, 255}  → 255 (ignore)
+```
+
+### Shadow 라벨링 원칙
+- CFMask overlay + FCI 영상이 **모두 어두운 경우만** 4(shadow) 라벨링
+- Dark water / dark rock과 구분 불가한 픽셀 → 0(미라벨)으로 두면 ignore 처리
+- Shadow 경계 픽셀도 0으로 두어도 됨 — 모델은 라벨된 픽셀만 학습
+
+### 수정 파일
+
+**`label_code/label_scene.py`**:
+- `LABEL_CLASSES`: 6-class `{0:nodata, 1:clear, 2:water, 3:snow, 4:shadow, 5:cloud, 255:fill}`
+- 레이어 이름: `"MY_LABELS (5=cloud 4=shadow 3=snow 2=water 1=clear 0=미라벨 255=fill)"`
+- 단축키 안내: `5`=cloud, `4`=shadow, `3`=snow, `2`=water, `1`=clear, `0`=미라벨
+- `launch_napari()`: `init_labels` 파라미터로 resume 모드 개선
+- `save_labels()`: 0~5/255 그대로 저장 (remap은 scene_to_patches.py에서)
+
+**`label_code/scene_to_patches.py`**:
+- `LABEL_REMAP` / `VALID_LABEL_VALUES` 상수 추가
+- `remap_labels()` 함수: `{1,2,3}→0`, `{4,5}→1`, `{0,255}→255`
+- `valid_mask`: `np.isin(lr, {1,2,3,4,5})` — 미라벨(0)·fill(255) 제외
+- `attrs`: `has_shadow`, `has_snow`, `has_water`, `has_clear`, `shadow/snow/water/clear_frac` 추가
+- 통계 출력: 6-class 분류 기준
+
+**`label_code/README.md`**:
+- 클래스 표 2개 분리 (napari scheme / patch 저장 scheme)
+- Shadow 라벨링 원칙 명시 (애매한 케이스 처리 방법 포함)
+- 전체 워크플로우 업데이트
+
+**`README.md`**:
+- Label Scheme 섹션: 학습 파이프라인 scheme + 수동 라벨링 scheme + remap 규칙
+- "Validation 수동 라벨링" 섹션 napari 단축키 업데이트 (5/4/3/2/1/0)
+- "GitHub 토큰 발급 및 push 설정" 섹션 추가
