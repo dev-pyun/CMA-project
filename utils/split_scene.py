@@ -26,7 +26,7 @@ from tempfile import TemporaryDirectory
 import cv2
 import numpy as np
 import zarr
-from numcodecs import Blosc
+from zarr.codecs import BloscCodec
 from tqdm import tqdm
 
 # Suppress PROJ database version warnings from rasterio
@@ -48,10 +48,10 @@ REQUIRED_BANDS = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
 ALL_BANDS = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B9']
 N_SPECTRAL = len(ALL_BANDS)  # always 8
 
-# Zarr compressors
-_COMP_UINT16 = Blosc(cname='zstd', clevel=3, shuffle=Blosc.BITSHUFFLE)
-_COMP_F32    = Blosc(cname='zstd', clevel=3, shuffle=Blosc.SHUFFLE)
-_COMP_UINT8  = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
+# Zarr compressors (zarr v3 BloscCodec)
+_COMP_UINT16 = BloscCodec(cname='zstd', clevel=3, shuffle='bitshuffle')
+_COMP_F32    = BloscCodec(cname='zstd', clevel=3, shuffle='shuffle')
+_COMP_UINT8  = BloscCodec(cname='zstd', clevel=5, shuffle='bitshuffle')
 
 
 def setup_logger():
@@ -156,21 +156,16 @@ def save_patch_zarr(patch_path: str, spectral: np.ndarray, rgb: np.ndarray,
                     hsv: np.ndarray, sobel: np.ndarray, label: np.ndarray):
     """Persist one patch to a zarr directory store."""
     store = zarr.open_group(patch_path, mode='w')
-    store.create_dataset('spectral', data=spectral,
-                         chunks=spectral.shape, dtype='uint16',
-                         compressor=_COMP_UINT16)
-    store.create_dataset('rgb', data=rgb,
-                         chunks=rgb.shape, dtype='float32',
-                         compressor=_COMP_F32)
-    store.create_dataset('hsv', data=hsv,
-                         chunks=hsv.shape, dtype='float32',
-                         compressor=_COMP_F32)
-    store.create_dataset('sobel', data=sobel,
-                         chunks=sobel.shape, dtype='float32',
-                         compressor=_COMP_F32)
-    store.create_dataset('label', data=label,
-                         chunks=label.shape, dtype='uint8',
-                         compressor=_COMP_UINT8)
+    store.create_array('spectral', data=spectral,
+                       chunks=spectral.shape, compressors=[_COMP_UINT16])
+    store.create_array('rgb',      data=rgb,
+                       chunks=rgb.shape,      compressors=[_COMP_F32])
+    store.create_array('hsv',      data=hsv,
+                       chunks=hsv.shape,      compressors=[_COMP_F32])
+    store.create_array('sobel',    data=sobel,
+                       chunks=sobel.shape,    compressors=[_COMP_F32])
+    store.create_array('label',    data=label,
+                       chunks=label.shape,    compressors=[_COMP_UINT8])
 
 
 # ── Main splitting logic ───────────────────────────────────────────────

@@ -7,7 +7,17 @@
 ### 배경 및 목표
 - QA_PIXEL 6-class 라벨을 **binary cloud / no-cloud**로 단순화
 - 패치 저장 시 학습에 활용 가능한 모든 파생 피처(RGB, HSV, Sobel)를 미리 계산해 저장
-- 저장 포맷을 HDF5 → **Zarr + blosc/zstd 압축**으로 교체 (랜덤 액세스 성능 및 압축률 개선)
+- 저장 포맷을 HDF5 → **Zarr + blosc/zstd 압축**으로 교체
+
+### Zarr 포맷 도입의 주요 이점
+1. **PyTorch DataLoader의 병렬 처리 성능 극대화 (GIL 병목 해소)**
+   - HDF5(`h5py`)는 단일 파일 기반으로 I/O 시 Global Interpreter Lock (GIL)이 걸리거나 C 레벨의 lock이 발생하여 여러 개의 DataLoader worker가 동시에 읽을 때 심각한 병목이 발생합니다.
+   - Zarr는 청크(chunk) 단위로 독립된 파일로 저장되므로, 여러 worker가 **동시에 lock 없이(lock-free) 데이터를 병렬로 읽을 수 있어 학습 속도가 크게 향상**됩니다.
+2. **손상 및 안정성 개선**
+   - HDF5는 파일 하나에 모든 데이터를 담고 있어 학습/패치 생성 중 프로세스가 강제 종료되면 전체 파일 구조가 손상(corrupted)될 위험이 큽니다.
+   - Zarr는 메타데이터(json)와 청크 단위 파일 리스트 형태이므로, 쓰기 중단 시에도 파일 전체가 깨지는 현상을 방지할 수 있습니다.
+3. **향상된 압축 속도 및 최신 코덱 지원**
+   - HDF5의 기본 zlib/gzip 압축보다 훨씬 빠르고 최적화된 **Blosc + Zstandard(zstd) + bitshuffle 코덱**을 네이티브로 지원하여, 디스크 공간 절약은 물론 압축 해제 속도가 매우 빨라 랜덤 액세스 성능이 크게 개선됩니다.
 
 ---
 
@@ -79,11 +89,11 @@
 #### 9. `utils/MFB.py`
 - `calculate_file_freq()`: `label < num_classes` 마스크로 nodata(255) 제외 후 빈도 계산
 
-#### 10. `inspect_h5.py`
+#### 10. `inspect_zarr.py` (구 `inspect_h5.py`)
 - zarr 패치 지원으로 전면 재작성
 - binary 라벨 시각화 (No-Cloud/Cloud/No-Data 3색)
 - spectral + RGB + HSV + Sobel Magnitude + NDSI 패널 표시
-- `.zgroup` 파일 유무로 단일 패치 / 상위 디렉토리 자동 구분
+- `.zgroup` / `zarr.json` 파일 유무로 단일 패치 / 상위 디렉토리 자동 구분
 
 ---
 
@@ -126,8 +136,8 @@ pip install zarr numcodecs
 python make_landsat_data.py --mode train
 
 # 패치 내용 확인
-python inspect_h5.py data/TRAIN_ZARR/LC08_..._PATCH0.zarr
-python inspect_h5.py data/TRAIN_ZARR/ --sample 6 --save
+python inspect_zarr.py data/TRAIN_ZARR/LC08_..._PATCH0.zarr
+python inspect_zarr.py data/TRAIN_ZARR/ --sample 6 --save
 ```
 
 ### 학습 방법 (변경 없음)
@@ -279,3 +289,159 @@ Weddell Sea 극지방 씬에서 clear land(노출 암석)가 거의 등장하지
 
 **`label_code/README.md`**:
 - Step 3 완전 재작성: 새 사용법 + Zarr 포맷 설명 + 씬 수 가이드라인
+
+---
+
+## [2026-05-04] zarr v3 compressor 오류 수정
+
+### 오류
+`scene_to_patches.py` 실행 시 `save_patch_zarr`에서 실패:
+```
+TypeError: Expected a BytesBytesCodec. Got <class 'numcodecs.blosc.Blosc'> instead.
+ZarrUserWarning: The `compressor` argument is deprecated. Use `compressors` instead.
+```
+`remote` 환경의 zarr 3.1.6은 numcodecs.Blosc를 더 이상 압축기로 받지 않음.
+
+### 수정 (`utils/split_scene.py`)
+- `from numcodecs import Blosc` → `from zarr.codecs import BloscCodec`
+- `_COMP_*` 정의를 `BloscCodec(cname=..., clevel=..., shuffle=...)` 로 교체
+  - shuffle 값: `'bitshuffle'` / `'shuffle'` (문자열)
+- `create_dataset` 호출의 `compressor=x` → `compressors=[x]` (리스트, zarr v3 API)
+
+### 검증
+`conda run -n remote python` 스모크 테스트 통과: save 후 open_group으로 shape 확인 OK
+
+---
+
+## [2026-05-04] HDF5 → Zarr 전환 후 잔존 코드 수정
+
+### 수정 파일
+
+**`network/model.py`**:
+- `from numcodecs import Blosc` → `from zarr.codecs import BloscCodec`
+- `Blosc(cname=..., shuffle=Blosc.BITSHUFFLE)` → `BloscCodec(cname=..., shuffle='bitshuffle')`
+- `create_dataset` → `create_array`, `compressor=x` → `compressors=[x]`
+- `data=` 사용 시 `shape=`, `dtype=` 동시 사용 불가 → 제거 (zarr v3 규칙)
+
+**`utils/join_predictions.py`**:
+- 전면 교체: h5py + `.h5` → zarr + `.zarr`
+- `join_patches(zarr_dir, output_path, key)` 형태로 재작성
+- `--h5_dir` → `--zarr_dir`, `--channel` → `--key` (`raw_prediction`, `pseudo_label` 등)
+
+**`utils/split_scene.py`**:
+- `create_dataset` → `create_array` (zarr v3에서 create_dataset deprecated)
+- `create_array(data=x, chunks=..., compressors=[...])` — dtype/shape은 data에서 자동 추론
+
+### zarr v3 create_array 규칙 요약
+- `data=` 사용 시: `shape=`, `dtype=` 동시 사용 불가 — numpy 배열에서 자동 추론
+- `compressor=` → `compressors=[codec]` (리스트)
+
+### 검증
+warnings-as-errors 모드 스모크 테스트 통과: spectral/label dtype·shape OK, pseudo_label write/read OK
+
+---
+
+## [2026-05-04] 세션 요약 — 수동 라벨링 파이프라인 완성 + zarr v3 호환성 확보
+
+### 작업 개요
+
+이번 세션에서 수동 라벨링 → validation/test 패치 생성 파이프라인 전체를 완성하고,
+zarr v3 환경(`remote` conda env, zarr 3.1.6)과의 호환성을 확보했다.
+
+---
+
+### 1. label_code 라벨 scheme 최종 확정
+
+**변경 흐름:**
+- 기존 binary (0=no-cloud, 1=cloud) → napari 초기값 혼동 문제
+- 6-class 수동 라벨 시도 (0=미라벨, 1=clear, 2=water, 3=snow, 4=shadow, 5=cloud)
+- clear land 제거 (Weddell Sea 극지방에서 거의 미등장)
+
+**최종 scheme:**
+
+| napari 값 | 의미 | patch 저장 값 |
+|-----------|------|--------------|
+| 0 | 미라벨 (napari 기본값) | 255 (ignore) |
+| 1 | water | 0 (no-cloud) |
+| 2 | snow / ice | 0 (no-cloud) |
+| 3 | cloud shadow (명확한 경우만) | 1 (cloud) |
+| 4 | cloud (opaque + cirrus + dilated) | 1 (cloud) |
+| 255 | 센서 fill (자동) | 255 (ignore) |
+
+**Shadow 라벨링 원칙:** CFMask overlay + FCI 영상이 **모두 어두운 경우만** 라벨링.
+Dark water/rock과 구분 불가한 픽셀은 0(미라벨)으로 두면 ignore 처리.
+
+---
+
+### 2. scene_to_patches.py 재작성
+
+- **입력 변경**: `--prepared_dir` → `--scene_dir` (원본 Landsat TIF 직접 읽기)
+  - 이유: `prepared/bands.tif`는 B2-B7+B9+B10 float32 TOA → 학습 패치(B1-B7+B9 uint16 DN)와 포맷 불일치
+- **출력 변경**: `label_code/patches/` HDF5 → `data/VALIDATION_ZARR/` / `data/TEST_ZARR/` Zarr
+  - 이유: Nambiar 논문에서 human-labeled validation을 매 epoch 사용 → 학습 패치와 동일 포맷 필요
+- **필터링**: fill > 50% 스킵, 유효 라벨 < 5% 스킵
+- **`utils/dir_paths.py`**: `TEST_ZARR_PATH` 추가
+
+---
+
+### 3. zarr v3 API 오류 3단계 수정
+
+| 오류 | 원인 | 수정 |
+|------|------|------|
+| `TypeError: Expected a BytesBytesCodec` | zarr v3는 `numcodecs.Blosc` 미지원 | `BloscCodec(cname, clevel, shuffle)` |
+| `ZarrDeprecationWarning: use compressors` | `compressor=` deprecated | `compressors=[codec]` (리스트) |
+| `ZarrDeprecationWarning: use create_array` | `create_dataset` deprecated | `create_array(...)` |
+| `ValueError: data + shape 동시 불가` | zarr v3 `create_array` 규칙 | `data=` 사용 시 `shape=`, `dtype=` 제거 |
+
+**수정 파일**: `utils/split_scene.py`, `network/model.py`
+
+---
+
+### 4. 전체 zarr 잔존 코드 정리
+
+- **`network/model.py`**: `generate_train_data()` 내 compressor 교체, `create_array` 변환
+- **`utils/join_predictions.py`**: h5py + `.h5` 전면 제거 → zarr + `.zarr` 재작성
+  - `--h5_dir` → `--zarr_dir`, `--channel` → `--key` (예: `raw_prediction`, `pseudo_label`)
+- **`inspect_zarr.py`** (구 `inspect_h5.py`): `.zgroup` → `.zgroup` or `zarr.json` 체크 추가 (zarr v3 메타데이터 파일명 변경)
+
+---
+
+### 5. 첫 번째 validation 패치 생성 완료
+
+씬: `LC08_L1GT_188114_20201114_20210315_02_T2` (6701×6811 px)
+
+```
+202 패치 저장
+ 57 스킵 (fill 비율 > 50%)
+417 스킵 (유효 라벨 < 5%)
+```
+
+**spectral 배열 채널 구성 확인:**
+
+| ch | 밴드 | min | max | nonzero |
+|----|------|-----|-----|---------|
+| 0 | B1 | 19718 | 24770 | 65536 |
+| 1 | B2 | 19213 | 24824 | 65536 |
+| 2 | B3 | 17741 | 23739 | 65536 |
+| 3 | B4 | 17549 | 24398 | 65536 |
+| 4 | B5 | 16485 | 24718 | 65536 |
+| 5 | B6 | 8346 | 18862 | 65536 |
+| 6 | B7 | 8237 | 18101 | 65536 |
+| 7 | B9 | 5566 | 8573 | 65536 |
+
+모든 채널 nonzero=65536 (256×256) — zero-fill 없이 전 픽셀 유효.
+
+---
+
+### 현재 상태 및 다음 단계
+
+**완료:**
+- [x] 수동 라벨링 scheme 확정 (5-class → binary remap)
+- [x] scene_to_patches.py zarr 포맷 + val/test 경로 출력
+- [x] zarr v3 API 완전 호환
+- [x] 첫 번째 validation 씬 패치 생성 (202개)
+- [x] inspect_zarr.py로 패치 내용 확인 방법 정립
+
+**다음 단계:**
+- [ ] validation/test 씬 추가 라벨링 (목표: 각 5–8 씬)
+- [ ] 학습 데이터(TRAIN_ZARR) 생성 후 train.py stage 0 실행

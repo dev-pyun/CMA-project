@@ -11,7 +11,7 @@ from shutil import copyfile
 
 import numpy as np
 import zarr
-from numcodecs import Blosc
+from zarr.codecs import BloscCodec
 import torch
 import torch.nn.functional as F
 from torch.nn import DataParallel
@@ -242,7 +242,7 @@ class Model:
     # ------------------------------------------------------------------
     def generate_train_data(self, filenames, labels, label_gen=True):
         """Save model predictions into the Zarr patch directories."""
-        _compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
+        _compressor = BloscCodec(cname='zstd', clevel=5, shuffle='bitshuffle')
 
         for label, filename in zip(labels, filenames):
             label_np = label.cpu().numpy().astype(np.uint8)
@@ -264,9 +264,9 @@ class Model:
             if target_key in store:
                 store[target_key][:] = label_np
             else:
-                store.create_dataset(target_key, data=label_np,
-                                     chunks=label_np.shape, dtype='uint8',
-                                     compressor=_compressor)
+                store.create_array(target_key, data=label_np,
+                                   chunks=label_np.shape,
+                                   compressors=[_compressor])
 
     def save_stats(self, filename, new_label_freq):
         row = [os.path.basename(filename)]

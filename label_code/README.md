@@ -172,6 +172,46 @@ label/     (256,256)   uint8   — 0=no-cloud, 1=cloud, 255=ignore
 >
 > 씬은 **서로 다른 날짜·계절·cloud coverage**로 다양하게 선택하세요.
 
+### Step 4. 패치 내용 확인 (`inspect_zarr.py`)
+
+패치가 올바르게 저장됐는지 텍스트 출력 또는 시각화로 확인합니다.
+스크립트는 `src/` 루트에 있으므로 `cd /home/pyuncb/src` 후 실행.
+
+```bash
+conda activate remote
+cd /home/pyuncb/src
+
+# 패치 하나 — 텍스트로 shape·dtype·클래스 분포 확인
+python inspect_zarr.py data/VALIDATION_ZARR/LC08_..._PATCH0.zarr
+
+# 패치 하나 — 시각화 PNG 저장
+python inspect_zarr.py data/VALIDATION_ZARR/LC08_..._PATCH0.zarr --save
+
+# 디렉토리 — 랜덤 9개 샘플 시각화
+python inspect_zarr.py data/VALIDATION_ZARR/ --sample 9 --save --out vis_output/
+```
+
+텍스트 출력 예시:
+```
+=================================================================
+Patch : LC08_L1GT_188114_20201114_20210315_02_T2_PATCH0.zarr
+Arrays: ['spectral', 'hsv', 'rgb', 'label', 'sobel']
+
+  [spectral]  shape=(256, 256, 8)  dtype=uint16  min=5566  max=24824
+  [label]     shape=(256, 256)     dtype=uint8
+
+  [label] 클래스 분포:
+      0 No-Cloud  :   3922 px (  6.0%) ██
+      1 Cloud     :      0 px (  0.0%)
+    255 No-Data   :  61614 px ( 94.0%) ███...
+=================================================================
+```
+
+시각화 PNG 패널 구성:
+- Row 0: True Color RGB / HSV / Sobel Magnitude / NDSI
+- Row 1: 개별 밴드 (B1, B5, B7, B9)
+- Row 2: 라벨 컬러맵 / 클래스 분포 막대 / 평균 스펙트럼
+
 ---
 
 ## 참고

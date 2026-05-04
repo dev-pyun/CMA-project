@@ -3,9 +3,9 @@ Join patch-level predictions back into full scene GeoTIFF files.
 
 Usage:
     python -m utils.join_predictions \
-        --h5_dir /path/to/prediction_h5/ \
-        --meta_file /path/to/scene_META.npy \
-        --output /path/to/output.tif
+        --zarr_dir /path/to/prediction_zarr/ \
+        --output /path/to/output.npy \
+        --key raw_prediction
 """
 
 import argparse
@@ -13,47 +13,46 @@ import glob
 import logging
 import os
 
-import h5py
 import numpy as np
-from rasterio import open as raster_open
-from rasterio.transform import from_bounds
+import zarr
 
 logger = logging.getLogger(__name__)
 
 
-def join_patches(h5_dir, output_path=None, prediction_channel=-1):
+def join_patches(zarr_dir, output_path=None, key='raw_prediction'):
     """
-    Join HDF5 patch predictions into a single numpy array.
+    Join Zarr patch predictions into a list ordered by patch index.
 
     Parameters
     ----------
-    h5_dir : str
-        Directory containing PATCH*.h5 files.
+    zarr_dir : str
+        Directory containing PATCH*.zarr directories.
     output_path : str, optional
-        If provided, save as .npy file.
-    prediction_channel : int
-        Channel index in the H5 data that contains predictions.
-        Default -1 (last channel).
+        If provided, save stacked predictions as .npy file.
+    key : str
+        Array name inside each zarr patch to read (e.g. 'raw_prediction',
+        'pseudo_label', or 'label').
 
     Returns
     -------
     patches : list of dict
-        Each dict has 'data' (np.ndarray) and 'index' (int).
+        Each dict has 'data' (np.ndarray) and 'index' (int), sorted by index.
     """
-    h5_files = sorted(glob.glob(os.path.join(h5_dir, '*PATCH*.h5')))
-    if not h5_files:
-        raise FileNotFoundError(f'No H5 patch files found in {h5_dir}')
+    zarr_files = sorted(glob.glob(os.path.join(zarr_dir, '*PATCH*.zarr')))
+    if not zarr_files:
+        raise FileNotFoundError(f'No .zarr patch files found in {zarr_dir}')
 
     patches = []
-    for h5_path in h5_files:
-        with h5py.File(h5_path, 'r') as hf:
-            data = hf.get('data')[:]
-            pred = data[:, :, prediction_channel]
+    for zarr_path in zarr_files:
+        store = zarr.open_group(zarr_path, mode='r')
+        if key not in store:
+            logger.warning(f'Key "{key}" not found in {zarr_path}, skipping.')
+            continue
+        data = store[key][:]
 
-        # Extract patch index from filename
-        basename = os.path.basename(h5_path)
+        basename = os.path.basename(zarr_path)
         idx = int(basename.split('PATCH')[1].split('.')[0])
-        patches.append({'data': pred, 'index': idx})
+        patches.append({'data': data, 'index': idx})
 
     patches.sort(key=lambda x: x['index'])
 
@@ -68,13 +67,13 @@ def join_patches(h5_dir, output_path=None, prediction_channel=-1):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(
-        description='Join patch predictions into a scene')
-    parser.add_argument('--h5_dir', required=True,
-                        help='Directory with PATCH*.h5 files')
+        description='Join zarr patch predictions into a scene')
+    parser.add_argument('--zarr_dir', required=True,
+                        help='Directory with PATCH*.zarr directories')
     parser.add_argument('--output', default=None,
                         help='Output .npy file path')
-    parser.add_argument('--channel', type=int, default=-1,
-                        help='Prediction channel index')
+    parser.add_argument('--key', default='raw_prediction',
+                        help='Zarr array key to read (default: raw_prediction)')
     args = parser.parse_args()
 
-    join_patches(args.h5_dir, args.output, args.channel)
+    join_patches(args.zarr_dir, args.output, args.key)

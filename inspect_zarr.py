@@ -236,7 +236,8 @@ def main():
 
     if os.path.isdir(path):
         # 단일 .zarr 패치인지, 상위 디렉토리인지 구분
-        if os.path.exists(os.path.join(path, '.zgroup')):
+        if (os.path.exists(os.path.join(path, '.zgroup')) or
+                os.path.exists(os.path.join(path, 'zarr.json'))):
             visualize_patch(path, save=args.save, out_dir=args.out)
         else:
             visualize_multiple(path, args.sample, args.save, args.out)
