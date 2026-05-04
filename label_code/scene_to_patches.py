@@ -1,228 +1,214 @@
 """
-라벨된 Landsat 씬 → 256×256 patch 자동 분할.
+라벨된 Landsat 씬 → 256×256 Zarr patch 분할.
 
-입력  : prepared/<scene_id>/bands.tif  (8, H, W) float32
-        labels/<scene_id>_labels.tif   (H, W) uint8
-            label_scene.py 출력 scheme:
-                0   = 미라벨 (napari 기본값)
-                1   = water
-                2   = snow / ice
-                3   = cloud shadow
-                4   = cloud (opaque + cirrus + dilated)
-                255 = 센서 fill
+학습 파이프라인과 완전히 동일한 포맷으로 저장하므로
+patch_dataset.py 가 training/validation/test 패치를 구분 없이 로딩 가능.
 
-출력  : patches/<split>/<scene_id>_p{i:05d}_{j:05d}.h5
-            /input  (8, 256, 256) float32
-            /label  (256, 256)    uint8
-                remap 후:
-                    0   = no-cloud  (원본 1/2)
-                    1   = cloud     (원본 3/4)
-                    255 = ignore    (원본 0/255)
-            attrs   : scene_id, row/col, valid_label_frac,
-                      has_cloud, has_shadow, has_snow, has_water, cloud_frac, ...
+입력  : scene_dir/   — 원본 Landsat L1 TIF 파일들 (B1~B7, B9, QA_PIXEL)
+        label_path   — label_scene.py 출력 (H, W) uint8
+            0=미라벨, 1=water, 2=snow, 3=shadow, 4=cloud, 255=fill
 
-필터링 규칙:
-  - fill 비율 > 50%         → 버림
-  - 유효 라벨 비율 < 5%    → 'train_aux'
-  - 유효 라벨 비율 ≥ 5%    → 'val'
+출력  : <out_root>/<scene_id>_PATCH{n}.zarr
+            spectral/  (H,W,8)  uint16 — B1-B7, B9 raw DN
+            rgb/       (H,W,3)  float32
+            hsv/       (H,W,3)  float32
+            sobel/     (H,W,3)  float32
+            label/     (H,W)    uint8   — remap 후: 0=no-cloud, 1=cloud, 255=ignore
+
+label remap:
+    {1(water), 2(snow)}      → 0  (no-cloud)
+    {3(shadow), 4(cloud)}    → 1  (cloud)
+    {0(미라벨), 255(fill)}   → 255 (ignore)
+
+필터링:
+  - fill 비율 > 50%       → 버림
+  - 유효 라벨 비율 < 5%  → 버림 (수동 라벨 패치는 val/test 전용이므로 관대하지 않게)
 
 사용 예:
+  # validation 패치 생성
   python scene_to_patches.py \\
-      --prepared_dir prepared/LC08_L1GT_188114_20201114_20210315_02_T2 \\
-      --label_path   labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \\
-      --out_root     patches/ \\
-      --patch_size 256 --stride 256
+      --scene_dir  /earth00_home/immj/Landsat/.../LC08_L1GT_188114_20201114_..._02_T2 \\
+      --label_path labels/LC08_L1GT_188114_20201114_..._labels.tif \\
+      --split val
+
+  # test 패치 생성
+  python scene_to_patches.py \\
+      --scene_dir  /earth00_home/immj/Landsat/.../LC08_L1GT_... \\
+      --label_path labels/LC08_L1GT_..._labels.tif \\
+      --split test
 """
 
 import argparse
-import json
+import os
+import sys
 from pathlib import Path
 
-import h5py
 import numpy as np
 import rasterio
 from tqdm import tqdm
 
+# utils/ 가 있는 src/ 를 경로에 추가
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.split_scene import (
+    ALL_BANDS, N_SPECTRAL,
+    find_band_file, find_qa_pixel_file,
+    compute_rgb, compute_hsv, compute_sobel, save_patch_zarr,
+)
+from utils.dir_paths import VALID_ZARR_PATH, TEST_ZARR_PATH
 
-# label_scene.py 출력 → 학습 파이프라인 binary 형식
+
+# label_scene.py 출력 → 학습 binary 형식
 # {shadow(3), cloud(4)} → 1(cloud)
-# {water(1), snow(2)} → 0(no-cloud)
+# {water(1), snow(2)}   → 0(no-cloud)
 # {nodata(0), fill(255)} → 255(ignore)
-LABEL_REMAP = {
-    0:   255,
-    1:   0,
-    2:   0,
-    3:   1,
-    4:   1,
-    255: 255,
-}
-
-# 유효 라벨로 인정되는 원본 값 (미라벨·fill 제외)
+LABEL_REMAP = {0: 255, 1: 0, 2: 0, 3: 1, 4: 1, 255: 255}
 VALID_LABEL_VALUES = {1, 2, 3, 4}
+
+DEFAULT_OUT = {
+    'val':  VALID_ZARR_PATH,
+    'test': TEST_ZARR_PATH,
+}
 
 
 def remap_labels(labels: np.ndarray) -> np.ndarray:
-    """label_scene.py 출력(0/1/2/3/4/5/255) → 학습 형식(0/1/255)."""
     out = np.full_like(labels, 255, dtype=np.uint8)
     for src_val, dst_val in LABEL_REMAP.items():
         out[labels == src_val] = dst_val
     return out
 
 
-# %% [1] Patch 자르기 + 필터링
-def split_into_patches(
-    bands: np.ndarray,
-    labels_raw: np.ndarray,
-    cfmask: np.ndarray,
-    patch_size: int = 256,
-    stride: int = 256,
-    min_valid_label_frac: float = 0.05,
-    max_fill_frac: float = 0.5,
-):
-    """
-    bands      : (C, H, W) float32
-    labels_raw : (H, W) uint8  — label_scene.py 출력 (0~5 / 255)
-    cfmask     : (H, W) uint8  — fill 식별용
-
-    yield (input_patch, label_patch_remapped, attrs_dict, split_name)
-    """
-    C, H, W = bands.shape
-    assert labels_raw.shape == (H, W), "labels shape mismatch"
-
-    n_total, n_kept_val, n_kept_aux, n_skipped = 0, 0, 0, 0
-
-    for i in range(0, H - patch_size + 1, stride):
-        for j in range(0, W - patch_size + 1, stride):
-            n_total += 1
-            b  = bands[:, i:i + patch_size, j:j + patch_size]
-            lr = labels_raw[i:i + patch_size, j:j + patch_size]
-            cf = cfmask[i:i + patch_size, j:j + patch_size]
-
-            fill_frac = (cf == 255).mean()
-            if fill_frac > max_fill_frac:
-                n_skipped += 1
-                continue
-
-            # 유효 라벨: 1~4 (미라벨 0 · fill 255 제외)
-            valid_mask = np.isin(lr, list(VALID_LABEL_VALUES))
-            valid_frac = valid_mask.mean()
-
-            attrs = {
-                "row_start":          int(i),
-                "col_start":          int(j),
-                "fill_frac":          float(fill_frac),
-                "valid_label_frac":   float(valid_frac),
-                "has_cloud":          bool((lr == 4).any()),
-                "has_shadow":         bool((lr == 3).any()),
-                "has_snow":           bool((lr == 2).any()),
-                "has_water":          bool((lr == 1).any()),
-                "cloud_frac":         float((lr == 4).mean()),
-                "shadow_frac":        float((lr == 3).mean()),
-                "snow_frac":          float((lr == 2).mean()),
-                "water_frac":         float((lr == 1).mean()),
-                "cfmask_cloud_frac":  float((cf == 1).mean()),
-                "cfmask_shadow_frac": float((cf == 2).mean()),
-                "cfmask_snow_frac":   float((cf == 3).mean()),
-                "cfmask_water_frac":  float((cf == 4).mean()),
-            }
-
-            split = "val" if valid_frac >= min_valid_label_frac else "train_aux"
-            if split == "val":
-                n_kept_val += 1
-            else:
-                n_kept_aux += 1
-
-            yield b, remap_labels(lr), attrs, split
-
-    print(f"\n[patch 통계]")
-    print(f"  총 {n_total} patches 검토")
-    print(f"  val      (유효 라벨 ≥ {min_valid_label_frac*100:.0f}%) : {n_kept_val}")
-    print(f"  train_aux(유효 라벨 < {min_valid_label_frac*100:.0f}%) : {n_kept_aux}")
-    print(f"  skipped  (fill > {max_fill_frac*100:.0f}%)             : {n_skipped}")
-
-
-# %% [2] HDF5 저장
-def save_patch_h5(path: Path, input_patch: np.ndarray, label_patch: np.ndarray,
-                  attrs: dict, scene_id: str):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.create_dataset("input", data=input_patch.astype(np.float16),
-                         compression="gzip", compression_opts=4)
-        f.create_dataset("label", data=label_patch.astype(np.uint8),
-                         compression="gzip")
-        f.attrs["scene_id"] = scene_id
-        for k, v in attrs.items():
-            f.attrs[k] = v
-
-
-# %% [3] 메인 — 한 씬 처리
 def process_scene(
-    prepared_dir: Path,
+    scene_dir: Path,
     label_path: Path,
     out_root: Path,
     patch_size: int = 256,
     stride: int = 256,
-    min_valid_label_frac: float = 0.05,
+    min_valid_frac: float = 0.05,
     max_fill_frac: float = 0.5,
-):
-    meta = json.loads((prepared_dir / "meta.json").read_text())
-    scene_id = meta["scene_id"]
+) -> int:
+    scene_id = scene_dir.name
     print(f"[처리 시작] {scene_id}")
 
-    with rasterio.open(prepared_dir / "bands.tif") as src:
-        bands = src.read().astype(np.float32)
-    print(f"  bands shape: {bands.shape}")
+    # 밴드 파일 확인
+    band_files = {}
+    for bk in ALL_BANDS:
+        bf = find_band_file(str(scene_dir), bk)
+        if bf:
+            band_files[bk] = bf
+        elif bk != 'B9':  # B1-B7 은 필수
+            print(f"  [오류] 필수 밴드 {bk} 없음. 스킵.")
+            return 0
 
-    with rasterio.open(prepared_dir / "cfmask.tif") as src:
-        cfmask = src.read(1).astype(np.uint8)
+    # QA_PIXEL (fill 마스크용)
+    qa_file = find_qa_pixel_file(str(scene_dir))
+    if qa_file is None:
+        print("  [오류] QA_PIXEL 없음. 스킵.")
+        return 0
 
+    # 수동 라벨 로드
     with rasterio.open(label_path) as src:
         labels_raw = src.read(1).astype(np.uint8)
 
-    print(f"  labels 원본 통계:")
-    names = {0:"미라벨", 1:"water", 2:"snow", 3:"shadow", 4:"cloud", 255:"fill"}
+    print("  labels 원본 통계:")
+    names = {0: "미라벨", 1: "water", 2: "snow", 3: "shadow", 4: "cloud", 255: "fill"}
     for v, name in names.items():
         pct = (labels_raw == v).mean() * 100
         if pct > 0:
             print(f"    {v:3d} {name:8s}: {pct:.1f}%")
 
-    saved = {"val": 0, "train_aux": 0}
-    for input_patch, label_patch, attrs, split in tqdm(
-        split_into_patches(bands, labels_raw, cfmask,
-                           patch_size, stride, min_valid_label_frac, max_fill_frac),
-        desc="patches",
-    ):
-        i, j = attrs["row_start"], attrs["col_start"]
-        out_path = out_root / split / f"{scene_id}_p{i:05d}_{j:05d}.h5"
-        save_patch_h5(out_path, input_patch, label_patch, attrs, scene_id)
-        saved[split] += 1
+    # 참조 크기
+    with rasterio.open(list(band_files.values())[0]) as src:
+        H, W = src.height, src.width
+    print(f"  scene shape: ({H}, {W})")
 
-    print(f"\n[저장 완료]")
-    print(f"  remap: {{1,2}}→0(no-cloud)  {{3,4}}→1(cloud)  {{0,255}}→255(ignore)")
-    for k, v in saved.items():
-        print(f"  {k}: {v} patches → {out_root / k}")
-    print(f"  총 {sum(saved.values())} patches\n")
+    out_root.mkdir(parents=True, exist_ok=True)
+    n_saved = n_skipped_fill = n_skipped_label = 0
+
+    pbar = tqdm(total=((H - patch_size) // stride + 1) * ((W - patch_size) // stride + 1),
+                desc=f"  {scene_id[:35]}", unit="patch", leave=False, ncols=100)
+
+    for i in range(0, H - patch_size + 1, stride):
+        for j in range(0, W - patch_size + 1, stride):
+
+            lr = labels_raw[i:i + patch_size, j:j + patch_size]
+
+            # fill 비율 체크 (QA_PIXEL Bit 0)
+            with rasterio.open(qa_file) as src:
+                from rasterio import windows as rwin
+                win = rwin.Window(j, i, patch_size, patch_size)
+                qa_patch = src.read(1, window=win).astype(np.uint16)
+            fill_frac = float((qa_patch & 1).astype(bool).mean())
+            if fill_frac > max_fill_frac:
+                n_skipped_fill += 1
+                pbar.update(1)
+                continue
+
+            # 유효 라벨 비율 체크
+            valid_frac = float(np.isin(lr, list(VALID_LABEL_VALUES)).mean())
+            if valid_frac < min_valid_frac:
+                n_skipped_label += 1
+                pbar.update(1)
+                continue
+
+            # 스펙트럴 밴드 읽기 → (H, W, 8) uint16
+            spectral = np.zeros((patch_size, patch_size, N_SPECTRAL), dtype=np.uint16)
+            for ch, bk in enumerate(ALL_BANDS):
+                if bk not in band_files:
+                    continue
+                with rasterio.open(band_files[bk]) as src:
+                    data = src.read(1, window=win)
+                h, w = data.shape
+                spectral[:h, :w, ch] = data
+
+            # 파생 피처
+            rgb   = compute_rgb(spectral)
+            hsv   = compute_hsv(rgb)
+            sobel = compute_sobel(rgb)
+
+            # 라벨 remap
+            label = remap_labels(lr)
+
+            # Zarr 저장
+            patch_path = str(out_root / f"{scene_id}_PATCH{n_saved}.zarr")
+            save_patch_zarr(patch_path, spectral, rgb, hsv, sobel, label)
+
+            n_saved += 1
+            pbar.update(1)
+            pbar.set_postfix(saved=n_saved)
+
+    pbar.close()
+    print(f"  ✓ {scene_id}: {n_saved} 저장, "
+          f"{n_skipped_fill} 스킵(fill), {n_skipped_label} 스킵(라벨 부족)")
+    print(f"    remap: {{1,2}}→0(no-cloud)  {{3,4}}→1(cloud)  {{0,255}}→255(ignore)")
+    print(f"    출력: {out_root}")
+    return n_saved
 
 
-# %% [4] CLI
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="라벨된 씬 → 256×256 patch 분할")
-    parser.add_argument("--prepared_dir",         type=Path, required=True)
-    parser.add_argument("--label_path",           type=Path, required=True)
-    parser.add_argument("--out_root",             type=Path,
-                        default=Path("/home/pyuncb/src/label_code/patches"))
-    parser.add_argument("--patch_size",           type=int,   default=256)
-    parser.add_argument("--stride",               type=int,   default=256)
-    parser.add_argument("--min_valid_label_frac", type=float, default=0.05)
-    parser.add_argument("--max_fill_frac",        type=float, default=0.5)
+    parser = argparse.ArgumentParser(description="라벨된 씬 → Zarr patch 분할 (학습 파이프라인 호환)")
+    parser.add_argument("--scene_dir",  type=Path, required=True,
+                        help="원본 Landsat L1 씬 폴더 (*_B1.TIF 등이 있는 곳)")
+    parser.add_argument("--label_path", type=Path, required=True,
+                        help="label_scene.py 출력 라벨 GeoTIFF")
+    parser.add_argument("--split",      choices=["val", "test"], default="val",
+                        help="val → VALIDATION_ZARR, test → TEST_ZARR")
+    parser.add_argument("--out_root",   type=Path, default=None,
+                        help="출력 디렉토리 직접 지정 (지정 시 --split 무시)")
+    parser.add_argument("--patch_size", type=int,   default=256)
+    parser.add_argument("--stride",     type=int,   default=256)
+    parser.add_argument("--min_valid_frac", type=float, default=0.05)
+    parser.add_argument("--max_fill_frac",  type=float, default=0.5)
     args = parser.parse_args()
 
+    out_root = args.out_root if args.out_root else Path(DEFAULT_OUT[args.split])
+    print(f"[출력 경로] {out_root}  (split={args.split})")
+
     process_scene(
-        prepared_dir=args.prepared_dir,
+        scene_dir=args.scene_dir,
         label_path=args.label_path,
-        out_root=args.out_root,
+        out_root=out_root,
         patch_size=args.patch_size,
         stride=args.stride,
-        min_valid_label_frac=args.min_valid_label_frac,
+        min_valid_frac=args.min_valid_frac,
         max_fill_frac=args.max_fill_frac,
     )

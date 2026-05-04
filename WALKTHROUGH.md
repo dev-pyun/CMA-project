@@ -250,3 +250,32 @@ Weddell Sea 극지방 씬에서 clear land(노출 암석)가 거의 등장하지
 - `label_code/scene_to_patches.py`: LABEL_REMAP, VALID_LABEL_VALUES, attrs, 통계 출력, docstring
 - `label_code/README.md`: 클래스 표, 단축키 표, 통계 예시
 - `README.md`: 수동 라벨링 scheme 표, 단축키 표
+
+---
+
+## [2026-05-04] scene_to_patches.py — Zarr 포맷으로 전환 + val/test 직접 저장
+
+### 변경 이유
+- 기존: HDF5(`/input`, `/label`)로 `label_code/patches/`에 저장 → 학습 파이프라인과 포맷 불일치
+- Nambiar 논문에서 validation은 human-labeled 데이터를 매 epoch 사용
+- 수동 라벨 패치가 `data/VALIDATION_ZARR/` / `data/TEST_ZARR/`에 학습 패치와 동일 포맷으로 저장되어야 함
+
+### 밴드 구성 불일치 해결
+- `prepared/bands.tif` (B2-B7+B9+B10, float32 TOA) ≠ 학습 패치 (B1-B7+B9, uint16 DN)
+- 해결: `--scene_dir`로 원본 TIF에서 직접 읽도록 변경 → `split_scene.py` 함수 재사용
+
+### 수정 파일
+
+**`label_code/scene_to_patches.py`**:
+- 완전 재작성: HDF5 → Zarr, `prepared_dir` → `--scene_dir` (원본 TIF)
+- `sys.path`로 `utils/split_scene.py` import: `find_band_file`, `compute_rgb/hsv/sobel`, `save_patch_zarr`
+- `--split val/test` 인자로 출력 경로 자동 결정 (`VALIDATION_ZARR` / `TEST_ZARR`)
+- 유효 라벨 < 5% 패치는 모두 버림 (val/test는 train_aux 개념 없음)
+- 출력 포맷: `spectral/rgb/hsv/sobel/label` (학습 패치와 100% 동일)
+
+**`utils/dir_paths.py`**:
+- `TEST_ZARR_PATH = data/TEST_ZARR` 추가
+- `makedirs` 목록에 `TEST_ZARR_PATH` 추가
+
+**`label_code/README.md`**:
+- Step 3 완전 재작성: 새 사용법 + Zarr 포맷 설명 + 씬 수 가이드라인

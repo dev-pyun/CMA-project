@@ -134,27 +134,43 @@ python label_scene.py \
 
 ### Step 3. patch 분할 (`scene_to_patches.py`)
 
+학습 파이프라인과 **동일한 Zarr 포맷**으로 저장됩니다.
+`--split val` → `data/VALIDATION_ZARR/`, `--split test` → `data/TEST_ZARR/`
+
 ```bash
+# validation 패치
 python scene_to_patches.py \
-    --prepared_dir prepared/LC08_L1GT_188114_20201114_20210315_02_T2 \
-    --label_path   labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \
-    --out_root     patches/ \
-    --patch_size 256 --stride 256
+    --scene_dir  /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea/2020/11/20201114/LC08_L1GT_188114_20201114_20210315_02_T2 \
+    --label_path labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \
+    --split val
+
+# test 패치
+python scene_to_patches.py \
+    --scene_dir  /earth00_home/immj/Landsat/.../LC08_... \
+    --label_path labels/LC08_..._labels.tif \
+    --split test
 ```
 
-이 단계에서 자동 remap: `{1,2,3}→0`, `{4,5}→1`, `{0,255}→255(ignore)`
+이 단계에서 자동 remap: `{1,2}→0`, `{3,4}→1`, `{0,255}→255(ignore)`
 
-출력 (`patches/`):
+출력 (`data/VALIDATION_ZARR/` 또는 `data/TEST_ZARR/`):
 
-| 경로 | 조건 | 용도 |
-|------|------|------|
-| `val/<scene>_p{i}_{j}.h5` | 유효 라벨 ≥ 5% | 검증 메인 |
-| `train_aux/<scene>_p{i}_{j}.h5` | 유효 라벨 < 5% | 보조 학습용 |
+각 patch Zarr (`<scene_id>_PATCH{n}.zarr`):
+```
+spectral/  (256,256,8) uint16  — B1-B7, B9 raw DN (학습 패치와 동일)
+rgb/       (256,256,3) float32
+hsv/       (256,256,3) float32
+sobel/     (256,256,3) float32
+label/     (256,256)   uint8   — 0=no-cloud, 1=cloud, 255=ignore
+```
 
-각 patch HDF5:
-- `/input` (8, 256, 256) float16 — 8-band 입력
-- `/label` (256, 256) uint8 — remap 후 (0=no-cloud, 1=cloud, 255=ignore)
-- `attrs` — scene_id, row/col, valid_label_frac, cloud/shadow/snow/water/clear_frac 등
+> **패치 수 가이드라인**
+> | 용도 | 씬 수 | 역할 |
+> |------|-------|------|
+> | Validation | 5–8 씬 | 매 epoch 평가, early stopping, 최적 모델 선택 |
+> | Test | 5–8 씬 | 학습 완료 후 최종 평가만 (학습 중 절대 사용 안 함) |
+>
+> 씬은 **서로 다른 날짜·계절·cloud coverage**로 다양하게 선택하세요.
 
 ---
 
