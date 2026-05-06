@@ -65,6 +65,20 @@ LABEL_CLASSES = {
 NUM_LABEL_CLASSES = 5  # 0~4 (255 제외)
 
 
+# %% [2-a] CFMask → label 번호 리맵
+# cfmask: 0=clear, 1=cloud, 2=shadow, 3=snow, 4=water, 255=fill
+# label : 0=미라벨, 1=water, 2=snow, 3=shadow, 4=cloud, 255=fill
+_CFMASK_TO_LABEL = np.array(
+    [0, 4, 0, 0, 0] + [0] * 250 + [255],
+    dtype=np.uint8,
+)  # index = cfmask 값 — cloud(1)만 label 4로 초기화, 나머지는 미라벨(0)
+
+
+def cfmask_to_init_labels(cfmask: np.ndarray) -> np.ndarray:
+    """CFMask 배열을 label 번호 공간으로 리맵."""
+    return _CFMASK_TO_LABEL[cfmask.astype(np.uint8)]
+
+
 # %% [2] prepared 데이터 로드
 def load_prepared(prepared_dir: Path):
     meta = json.loads((prepared_dir / "meta.json").read_text())
@@ -84,7 +98,8 @@ def load_prepared(prepared_dir: Path):
 
 # %% [3] napari 라벨링 GUI
 def launch_napari(fci_rgb: np.ndarray, cfmask: np.ndarray, scene_id: str,
-                  init_labels: np.ndarray = None, use_sam: bool = False):
+                  init_labels: np.ndarray = None, use_sam: bool = False,
+                  init_from_cfmask: bool = False):
     import napari
 
     viewer = napari.Viewer(title=f"Cloud Labeling — {scene_id}")
@@ -103,10 +118,13 @@ def launch_napari(fci_rgb: np.ndarray, cfmask: np.ndarray, scene_id: str,
 
     # 라벨 layer
     H, W = fci_rgb.shape[:2]
-    if init_labels is None:
-        labels_arr = np.zeros((H, W), dtype=np.uint8)
-    else:
+    if init_labels is not None:
         labels_arr = init_labels.copy()
+    elif init_from_cfmask:
+        labels_arr = cfmask_to_init_labels(cfmask)
+        print("[init] CFMask → label 리맵으로 초기화 (오탐·미탐 영역만 수정하세요)")
+    else:
+        labels_arr = np.zeros((H, W), dtype=np.uint8)
     labels_arr[cfmask == 255] = 255  # fill 영역 자동 마킹
 
     labels_layer = viewer.add_labels(
@@ -177,6 +195,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_sam", action="store_true", help="napari-sam plugin 활성화")
     parser.add_argument("--resume", action="store_true",
                         help="기존 라벨 있으면 이어서 작업")
+    parser.add_argument("--init_cfmask", action="store_true",
+                        help="CFMask를 초기 라벨로 사용 (오탐·미탐 영역만 수정)")
     args = parser.parse_args()
 
     fci_rgb, cfmask, meta, _ = load_prepared(args.prepared_dir)
@@ -190,6 +210,7 @@ if __name__ == "__main__":
             init_labels = src.read(1)
 
     final_labels = launch_napari(fci_rgb, cfmask, scene_id,
-                                 init_labels=init_labels, use_sam=args.use_sam)
+                                 init_labels=init_labels, use_sam=args.use_sam,
+                                 init_from_cfmask=args.init_cfmask)
     save_labels(final_labels, args.prepared_dir, out_path)
     print("\n[완료] 다음 단계: scene_to_patches.py 로 256×256 patch 분할.")

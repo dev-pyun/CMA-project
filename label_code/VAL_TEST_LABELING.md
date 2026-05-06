@@ -46,6 +46,8 @@ python prepare_scene.py --scene_dir $WEDDELL/2020/12/20201215/LC08_L1GT_181114_2
 ## Step 2. napari 라벨링 (`label_scene.py`)
 
 > MobaXterm X11 포워딩 필요. 씬 하나씩 실행 후 창 닫으면 자동 저장.
+>
+> `--init_cfmask` 플래그: MY_LABELS 레이어를 CFMask 결과로 초기화 → 오탐·미탐 영역만 페인트하면 됨.
 
 ```bash
 conda activate napari_env
@@ -53,22 +55,22 @@ cd /home/pyuncb/src/label_code
 
 # ── Validation ──────────────────────────────────────────────────────────
 # 188114 는 이미 완료 (V)
-python label_scene.py --prepared_dir prepared/LC08_L1GT_199110_20200128_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_177110_20200219_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_171110_20200225_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_165110_20200302_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_181098_20200419_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_200111_20201017_20201105_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_199105_20201213_20210314_02_T2
+python label_scene.py --prepared_dir prepared/LC08_L1GT_199110_20200128_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_177110_20200219_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_171110_20200225_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_165110_20200302_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_181098_20200419_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_200111_20201017_20201105_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_199105_20201213_20210314_02_T2 --init_cfmask
 
 # ── Test ────────────────────────────────────────────────────────────────
-python label_scene.py --prepared_dir prepared/LC08_L1GT_187116_20200124_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_177110_20200203_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_175109_20200308_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_184109_20200307_20201016_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_207105_20201018_20201105_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_195110_20201201_20210312_02_T2
-python label_scene.py --prepared_dir prepared/LC08_L1GT_181114_20201215_20210314_02_T2
+python label_scene.py --prepared_dir prepared/LC08_L1GT_187116_20200124_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_177110_20200203_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_175109_20200308_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_184109_20200307_20201016_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_207105_20201018_20201105_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_195110_20201201_20210312_02_T2 --init_cfmask
+python label_scene.py --prepared_dir prepared/LC08_L1GT_181114_20201215_20210314_02_T2 --init_cfmask
 ```
 
 저장 위치: `labels/<scene_id>_labels.tif`

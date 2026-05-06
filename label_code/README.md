@@ -95,9 +95,14 @@ python prepare_scene.py \
 ```bash
 python label_scene.py \
     --prepared_dir prepared/LC08_L1GT_188114_20201114_20210315_02_T2
-    # GPU 있으면: --use_sam
+    # CFMask로 cloud 영역 미리 초기화: --init_cfmask  (권장)
     # 이어서 작업: --resume
+    # GPU 있으면: --use_sam
 ```
+
+`--init_cfmask` 사용 시 CFMask의 cloud 픽셀(class 1)이 label 4(cloud)로 미리 칠해진 상태로 시작됩니다.
+shadow / snow / water / clear 영역은 0(미라벨)으로 시작하므로 직접 칠해야 합니다.
+오탐(cloud가 아닌데 칠해진 곳)은 `0` 키로 지우고, 미탐(칠해지지 않은 cloud)은 `4` 키로 추가합니다.
 
 **napari 단축키:**
 

@@ -552,3 +552,40 @@ Val·Test는 전 씬 수동 픽셀 라벨링 (QA_PIXEL 사용 안 함)
 
 - followlinks 수정 후 Train Zarr 재실행 시 나머지 28개 처리 (`160109`는 `.done`으로 skip)
 - Val/Test 14개 씬 수동 라벨링 진행 예정 (`label_code/VAL_TEST_LABELING.md` 참조)
+
+---
+
+## [2026-05-06] label_scene.py — CFMask 초기화 기능 추가
+
+### 배경
+
+수동 라벨링 시 빈 캔버스에서 시작하면 모든 픽셀을 직접 칠해야 해서 시간이 과다 소요됨.
+CFMask(QA_PIXEL 기반) 결과를 초기 라벨로 불러온 뒤, 오탐·미탐 영역만 수정하는 방식으로 개선.
+
+### 수정 파일
+
+**`label_code/label_scene.py`**:
+- `_CFMASK_TO_LABEL` lookup table 추가
+  - cfmask 1(cloud) → label 4(cloud) 만 초기화
+  - shadow / snow / water / clear → label 0(미라벨) 유지
+  - cfmask 255(fill) → label 255(fill)
+- `cfmask_to_init_labels(cfmask)` 함수 추가 — lookup table 인덱싱으로 O(1) 리맵
+- `launch_napari()` 에 `init_from_cfmask` 파라미터 추가
+- CLI `--init_cfmask` 플래그 추가
+
+**`label_code/VAL_TEST_LABELING.md`**:
+- Step 2의 모든 `label_scene.py` 명령에 `--init_cfmask` 추가
+
+### 사용 예
+
+```bash
+# cloud 영역이 미리 칠해진 상태로 시작, shadow·snow·water 직접 수정
+python label_scene.py --prepared_dir prepared/LC08_L1GT_... --init_cfmask
+
+# 중단 후 이어서 작업 (저장된 라벨 우선, init_cfmask 무시)
+python label_scene.py --prepared_dir prepared/LC08_L1GT_... --resume
+```
+
+### 현재 상태
+
+- Val/Test 14개 씬 라벨링 진행 중 (`--init_cfmask` 적용)
