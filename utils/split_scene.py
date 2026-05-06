@@ -20,6 +20,7 @@ import glob
 import logging
 import os
 import random
+import shutil
 import warnings
 from tempfile import TemporaryDirectory
 
@@ -189,6 +190,21 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
         Overlap between adjacent patches (pixels).
     """
     scene_name = os.path.basename(scene_dir)
+    done_marker = os.path.join(out_folder, f'{scene_name}.done')
+
+    # 완료된 씬은 스킵 (-1 반환으로 호출자가 구분)
+    if os.path.exists(done_marker):
+        with open(done_marker) as f:
+            n_prev = int(f.read().strip())
+        logger.info(f'  {scene_name}: already done ({n_prev} patches), skipping.')
+        return -1
+
+    # 중간에 중단된 패치가 있으면 삭제 후 재처리
+    partial = glob.glob(os.path.join(out_folder, f'{scene_name}_PATCH*.zarr'))
+    if partial:
+        logger.info(f'  {scene_name}: removing {len(partial)} partial patches, reprocessing.')
+        for p in partial:
+            shutil.rmtree(p)
 
     # Find required band files; scene is skipped if any are missing
     band_files = {}
@@ -288,6 +304,11 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
     patch_pbar.close()
     print(f'  ✓ {scene_name}: {n_saved} saved, {n_skipped} skipped (no-data), '
           f'{img_height}x{img_width} px')
+
+    # 완료 마커 기록
+    with open(done_marker, 'w') as f:
+        f.write(str(n_saved))
+
     return n_saved
 
 
@@ -303,7 +324,7 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
     if find_band_file(scene_parent_dir, 'B1') is not None:
         scene_dirs = [scene_parent_dir]
     else:
-        for root, dirs, files in os.walk(scene_parent_dir):
+        for root, dirs, files in os.walk(scene_parent_dir, followlinks=True):
             if find_band_file(root, 'B1') is not None:
                 scene_dirs.append(root)
                 dirs.clear()
@@ -323,6 +344,7 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
     print(f'================================================\n')
 
     total_patches = 0
+    n_skipped_scenes = 0
     scene_pbar = tqdm(scene_dirs, desc='Scenes', unit='scene', ncols=100)
 
     for scene_dir in scene_pbar:
@@ -331,14 +353,18 @@ def make_patches(scene_parent_dir, out_folder, mode='train',
         n = split_scene_to_patches(
             scene_dir, out_folder, mode=mode,
             patch_size=patch_size, overlap=overlap)
-        if n:
+        if n > 0:
             total_patches += n
-        scene_pbar.set_postfix(total_patches=total_patches)
+        elif n < 0:
+            n_skipped_scenes += 1
+        scene_pbar.set_postfix(total_patches=total_patches, skipped=n_skipped_scenes)
 
     print(f'\n=== Done! ===')
-    print(f'Total scenes processed: {total}')
-    print(f'Total patches created:  {total_patches}')
-    print(f'Output directory:       {out_folder}')
+    print(f'Total scenes:          {total}')
+    print(f'  - processed:         {total - n_skipped_scenes}')
+    print(f'  - skipped (done):    {n_skipped_scenes}')
+    print(f'Total patches created: {total_patches}')
+    print(f'Output directory:      {out_folder}')
 
 
 if __name__ == '__main__':
