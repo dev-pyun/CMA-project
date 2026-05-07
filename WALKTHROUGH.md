@@ -589,3 +589,38 @@ python label_scene.py --prepared_dir prepared/LC08_L1GT_... --resume
 ### 현재 상태
 
 - Val/Test 14개 씬 라벨링 진행 중 (`--init_cfmask` 적용)
+
+---
+
+## [2026-05-07] 임계값 segmentation 테스트 + 패치 위치 오버뷰
+
+### 신규 파일
+
+**`label_code/test_segmentation.py`**:
+- 밝기/NDSI/NDWI/Cirrus/BT 임계값 기반 cloud segmentation 계산
+- napari에서 CFMask ref + Threshold Seg 레이어 동시 표시 → 토글 비교
+- CLI 파라미터: `--bright`, `--cirrus`, `--ndsi`, `--ndwi`, `--bt`
+
+```bash
+conda activate napari_env
+cd /home/pyuncb/src/label_code
+python test_segmentation.py --prepared_dir prepared/LC08_L1GT_...
+python test_segmentation.py --prepared_dir prepared/LC08_L1GT_... --bright 0.20 --cirrus 0.04
+```
+
+### 수정 파일
+
+**`inspect_zarr.py`**:
+- 패치 이름에서 `scene_id` + `patch_idx` 파싱 (`parse_patch_name()`)
+- FCI 자동 탐색: `label_code/prepared/{scene_id}/fci.tif` (기본 경로, `--fci_dir`로 변경 가능)
+- `compute_patch_bbox()`: patch_idx → 씬 내 (row_start, col_start) 좌표 계산
+- `make_scene_overview()`: FCI 썸네일(512px 이하) 위에 빨간 박스로 패치 위치 표시
+- 시각화 하단에 씬 오버뷰 행 자동 추가 (FCI 없으면 조용히 스킵)
+
+```bash
+# 씬 oFCI 없는 TRAIN 패치 → 오버뷰 없이 정상 출력
+python inspect_zarr.py data/TRAIN_ZARR/..._PATCH5.zarr --save
+
+# prepared FCI 있는 VAL 패치 → 씬 오버뷰 + 빨간 박스 자동 표시
+python inspect_zarr.py data/VALIDATION_ZARR/..._PATCH5.zarr --save
+```

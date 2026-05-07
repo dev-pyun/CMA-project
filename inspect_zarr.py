@@ -22,6 +22,7 @@ import argparse
 import glob
 import os
 import random
+import re
 import sys
 
 import numpy as np
@@ -91,9 +92,85 @@ def make_legend_patches():
             for c in [0, 1, 255]]
 
 
+# ── 패치 위치 계산 ─────────────────────────────────────────────────────
+
+PATCH_SIZE = 256  # split_scene.py 기본값
+PATCH_OVERLAP = 0
+
+# FCI 기본 탐색 경로 (스크립트 위치 기준 label_code/prepared/)
+_SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_FCI_DIR = os.path.join(_SCRIPT_DIR, 'label_code', 'prepared')
+
+
+def parse_patch_name(patch_path: str):
+    """'..._{scene_id}_PATCH{n}.zarr' → (scene_id, patch_idx) 또는 (None, None)."""
+    basename = os.path.splitext(os.path.basename(patch_path))[0]
+    m = re.match(r'^(.+)_PATCH(\d+)$', basename)
+    if not m:
+        return None, None
+    return m.group(1), int(m.group(2))
+
+
+def find_fci(scene_id: str, fci_dir: str) -> str | None:
+    """fci_dir 아래에서 scene_id 에 해당하는 fci.tif 경로를 찾아 반환."""
+    candidate = os.path.join(fci_dir, scene_id, 'fci.tif')
+    return candidate if os.path.exists(candidate) else None
+
+
+def compute_patch_bbox(patch_idx: int, img_h: int, img_w: int,
+                       patch_size: int = PATCH_SIZE,
+                       overlap: int = PATCH_OVERLAP):
+    """패치 인덱스 → 씬 내 위치 (row_start, col_start) 픽셀 좌표."""
+    step = patch_size - overlap
+    n_patches_x = max(1, (img_w - overlap) // step)
+    iy = patch_idx // n_patches_x
+    ix = patch_idx % n_patches_x
+    row_start = min(iy * step, max(0, img_h - patch_size))
+    col_start = min(ix * step, max(0, img_w - patch_size))
+    return row_start, col_start
+
+
+def make_scene_overview(fci_path: str, row_start: int, col_start: int,
+                        patch_size: int = PATCH_SIZE,
+                        max_side: int = 512) -> np.ndarray | None:
+    """
+    FCI 썸네일 위에 패치 위치를 빨간 박스로 표시한 RGB 배열 반환.
+    max_side: 긴 변의 최대 픽셀 수 (다운샘플링 기준).
+    """
+    try:
+        import rasterio
+        from rasterio.enums import Resampling
+    except ImportError:
+        return None
+
+    with rasterio.open(fci_path) as src:
+        H, W = src.height, src.width
+        scale = min(max_side / H, max_side / W, 1.0)
+        out_h, out_w = max(1, int(H * scale)), max(1, int(W * scale))
+        fci = src.read(out_shape=(3, out_h, out_w), resampling=Resampling.average)
+
+    thumb = np.transpose(fci, (1, 2, 0)).copy()   # (out_h, out_w, 3) uint8
+
+    # 패치 박스 좌표 (스케일 적용)
+    r0 = int(row_start * scale)
+    c0 = int(col_start * scale)
+    r1 = min(out_h - 1, r0 + max(1, int(patch_size * scale)))
+    c1 = min(out_w - 1, c0 + max(1, int(patch_size * scale)))
+
+    # 빨간 테두리 (3px)
+    t = 3
+    thumb[r0:r0+t, c0:c1] = [255, 50, 50]
+    thumb[r1-t:r1, c0:c1] = [255, 50, 50]
+    thumb[r0:r1, c0:c0+t] = [255, 50, 50]
+    thumb[r0:r1, c1-t:c1] = [255, 50, 50]
+
+    return thumb
+
+
 # ── 시각화 ─────────────────────────────────────────────────────────────
 
-def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
+def visualize_patch(path: str, save: bool = False, out_dir: str = '.',
+                    fci_dir: str = DEFAULT_FCI_DIR):
     store = load_zarr(path)
     print_zarr_info(path, store)
 
@@ -105,7 +182,30 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
 
     has_pseudo = 'pseudo_label' in store
 
-    n_rows = 3 if has_pseudo else 2
+    # ── 씬 오버뷰 (fci_dir 에서 FCI 자동 탐색, 없으면 조용히 스킵) ────
+    overview       = None
+    overview_title = ''
+    scene_id, patch_idx = parse_patch_name(path)
+    if scene_id is not None:
+        fci_path = find_fci(scene_id, fci_dir)
+        if fci_path:
+            try:
+                import rasterio as _rio
+                with _rio.open(fci_path) as src:
+                    img_h, img_w = src.height, src.width
+                row_start, col_start = compute_patch_bbox(patch_idx, img_h, img_w)
+                overview = make_scene_overview(fci_path, row_start, col_start)
+                overview_title = (
+                    f'Scene Overview ({img_h}×{img_w} px)  '
+                    f'│  Patch #{patch_idx}  @row={row_start}, col={col_start}'
+                )
+                print(f'[overview] patch #{patch_idx} → row={row_start}, col={col_start}')
+            except Exception as e:
+                print(f'[overview] FCI 로드 실패: {e}')
+
+    n_base = 3 if has_pseudo else 2
+    has_ov = overview is not None
+    n_rows = n_base + (1 if has_ov else 0)
     n_cols = 4
     fig = plt.figure(figsize=(n_cols * 4, n_rows * 3.5), dpi=100)
     fig.patch.set_facecolor('#1a1a2e')
@@ -118,6 +218,12 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
         for spine in ax.spines.values():
             spine.set_edgecolor('#333355')
         return ax
+
+    def _style(ax):
+        ax.set_facecolor('#16213e')
+        ax.tick_params(colors='#aaaaaa', labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#333355')
 
     def show(ax, img, title, cmap=None, vmin=None, vmax=None, colorbar=False):
         im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax,
@@ -138,11 +244,11 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
     show(_ax(0, 2), sobel_mag, 'Sobel Magnitude', cmap='hot', vmin=0, vmax=vmax_s)
 
     # NDSI from spectral bands
-    g    = spectral[:, :, 2]
-    s1   = spectral[:, :, 5]
+    g     = spectral[:, :, 2]
+    s1    = spectral[:, :, 5]
     denom = g + s1
     denom[denom == 0] = 1e-6
-    ndsi = (g - s1) / denom
+    ndsi  = (g - s1) / denom
     show(_ax(0, 3), ndsi, 'NDSI (spectral)', cmap='RdBu_r', vmin=-1, vmax=1,
          colorbar=True)
 
@@ -155,34 +261,31 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
         show(_ax(1, col), norm, bname, cmap='gray')
 
     # Row 2: labels + stats
-    lbl_rgb = label_to_rgb(label)
-    ax_lbl  = _ax(2 if has_pseudo else 1, 0)  # re-use slot
-    ax_lbl  = _ax(n_rows - 1, 0)
-    show(ax_lbl, lbl_rgb, 'QA_PIXEL (binary)')
+    stat_row = 2 if has_pseudo else 1
+    lbl_rgb  = label_to_rgb(label)
+    ax_lbl   = _ax(stat_row, 0)
+    show(ax_lbl, lbl_rgb, 'Label (binary)')
     ax_lbl.legend(handles=make_legend_patches(), loc='lower right', fontsize=6,
                   facecolor='#0f0f23', labelcolor='white',
                   framealpha=0.7, handlelength=1.0)
 
     if has_pseudo:
         ps_lbl = store['pseudo_label'][:]
-        show(_ax(n_rows - 1, 1), label_to_rgb(ps_lbl), 'Pseudo-label')
+        show(_ax(stat_row, 1), label_to_rgb(ps_lbl), 'Pseudo-label')
 
     # Pixel count bar chart
-    ax_bar = _ax(n_rows - 1, 2)
-    ax_bar.set_facecolor('#16213e')
-    counts = [(label == c).sum() for c in [0, 1]]
+    ax_bar = _ax(stat_row, 2)
+    _style(ax_bar)
+    counts     = [(label == c).sum() for c in [0, 1]]
     colors_bar = [BINARY_CLASS_COLORS[c] for c in [0, 1]]
     ax_bar.bar([0, 1], counts, color=colors_bar, edgecolor='#333355')
     ax_bar.set_xticks([0, 1])
     ax_bar.set_xticklabels(['No-Cloud', 'Cloud'], fontsize=8, color='#aaaaaa')
     ax_bar.set_title('Class Pixel Count', color='#e0e0ff', fontsize=9, pad=4)
-    ax_bar.tick_params(colors='#aaaaaa', labelsize=7)
-    for spine in ax_bar.spines.values():
-        spine.set_edgecolor('#333355')
 
     # Spectral mean line
-    ax_line = _ax(n_rows - 1, 3)
-    ax_line.set_facecolor('#16213e')
+    ax_line = _ax(stat_row, 3)
+    _style(ax_line)
     means = spectral.mean(axis=(0, 1))
     ax_line.plot(range(8), means, color='#7ec8e3', marker='o',
                  markersize=4, linewidth=1.5)
@@ -190,9 +293,16 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
     ax_line.set_xticklabels(['B1','B2','B3','B4','B5','B6','B7','B9'],
                              fontsize=7, color='#aaaaaa')
     ax_line.set_title('Mean Spectral (TOA refl.)', color='#e0e0ff', fontsize=9, pad=4)
-    ax_line.tick_params(colors='#aaaaaa', labelsize=7)
-    for spine in ax_line.spines.values():
-        spine.set_edgecolor('#333355')
+
+    # ── 씬 오버뷰 행 (FCI 있을 때만) ────────────────────────────────────
+    if has_ov:
+        ov_row = stat_row + 1
+        ax_ov  = plt.subplot2grid((n_rows, n_cols), (ov_row, 0), colspan=n_cols, fig=fig)
+        _style(ax_ov)
+        ax_ov.imshow(overview, interpolation='bilinear')
+        ax_ov.set_title(overview_title, color='#ff8888', fontsize=9, pad=4)
+        ax_ov.set_xticks([])
+        ax_ov.set_yticks([])
 
     plt.tight_layout(pad=1.0)
 
@@ -209,7 +319,8 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.'):
     plt.close(fig)
 
 
-def visualize_multiple(zarr_dir: str, n_samples: int, save: bool, out_dir: str):
+def visualize_multiple(zarr_dir: str, n_samples: int, save: bool, out_dir: str,
+                       fci_dir: str = DEFAULT_FCI_DIR):
     files = glob.glob(os.path.join(zarr_dir, '*.zarr'))
     if not files:
         print(f'.zarr 패치를 찾을 수 없습니다: {zarr_dir}')
@@ -217,7 +328,7 @@ def visualize_multiple(zarr_dir: str, n_samples: int, save: bool, out_dir: str):
     sampled = random.sample(files, min(n_samples, len(files)))
     print(f'\n{len(sampled)}개 패치 시각화 중...')
     for f in sampled:
-        visualize_patch(f, save=save, out_dir=out_dir)
+        visualize_patch(f, save=save, out_dir=out_dir, fci_dir=fci_dir)
 
 
 def main():
@@ -232,17 +343,18 @@ def main():
                         help='저장 디렉토리 (기본: vis_output)')
     parser.add_argument('--sample', type=int, default=1,
                         help='디렉토리 지정 시 랜덤 샘플 수 (기본: 1)')
+    parser.add_argument('--fci_dir', default=DEFAULT_FCI_DIR,
+                        help=f'씬 FCI 탐색 루트 디렉토리 (기본: {DEFAULT_FCI_DIR})')
     args = parser.parse_args()
 
     path = os.path.abspath(args.path)
 
     if os.path.isdir(path):
-        # 단일 .zarr 패치인지, 상위 디렉토리인지 구분
         if (os.path.exists(os.path.join(path, '.zgroup')) or
                 os.path.exists(os.path.join(path, 'zarr.json'))):
-            visualize_patch(path, save=args.save, out_dir=args.out)
+            visualize_patch(path, save=args.save, out_dir=args.out, fci_dir=args.fci_dir)
         else:
-            visualize_multiple(path, args.sample, args.save, args.out)
+            visualize_multiple(path, args.sample, args.save, args.out, fci_dir=args.fci_dir)
     else:
         print(f'경로가 없습니다: {path}')
         sys.exit(1)

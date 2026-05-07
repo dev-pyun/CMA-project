@@ -64,6 +64,15 @@ LABEL_CLASSES = {
 
 NUM_LABEL_CLASSES = 5  # 0~4 (255 제외)
 
+# CFMask ref 레이어 고정 색상: 0=clear, 1=cloud, 2=shadow, 3=snow, 4=water
+_CFMASK_COLORS = {
+    0: (0.0, 0.0, 0.0, 0.0),    # clear  → 투명
+    1: (1.0, 1.0, 1.0, 0.85),   # cloud  → 흰색
+    2: (0.5, 0.1, 0.7, 0.85),   # shadow → 보라
+    3: (0.0, 0.9, 0.9, 0.85),   # snow   → 하늘색
+    4: (0.1, 0.3, 1.0, 0.85),   # water  → 파랑
+}
+
 
 # %% [2-a] CFMask → label 번호 리맵
 # cfmask: 0=clear, 1=cloud, 2=shadow, 3=snow, 4=water, 255=fill
@@ -110,11 +119,12 @@ def launch_napari(fci_rgb: np.ndarray, cfmask: np.ndarray, scene_id: str,
     # CFMask overlay (반투명, 위치 참고용)
     cfmask_display = cfmask.copy()
     cfmask_display[cfmask == 255] = 0
-    viewer.add_labels(
+    cfmask_layer = viewer.add_labels(
         cfmask_display.astype(np.uint8),
-        name="CFMask ref (1=cloud 2=shadow 3=snow 4=water)",
+        name="CFMask ref  ■흰=cloud ■하늘=snow ■보라=shadow ■파랑=water",
         opacity=0.35,
     )
+    cfmask_layer.color = _CFMASK_COLORS
 
     # 라벨 layer
     H, W = fci_rgb.shape[:2]
