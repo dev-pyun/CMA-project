@@ -116,7 +116,7 @@ if __name__ == '__main__':
         full=args.full, aug=args.aug,
         reset=args.reset_stage_data)
 
-    test_loader = setup_data(mode='test', path=VALID_PATH)
+    test_loader = setup_data(args.batch_size, mode='test', path=VALID_PATH)
 
     # Initialize model
     model = Model(exp, gpu_id=args.gpu_id)

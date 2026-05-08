@@ -15,7 +15,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-NUM_CLASSES = 6
+NUM_CLASSES = 2  # binary: 0=no-cloud, 1=cloud
 
 
 def get_MFB_weights(dataloader, num_classes=NUM_CLASSES):

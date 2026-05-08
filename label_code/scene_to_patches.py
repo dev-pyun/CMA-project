@@ -85,6 +85,7 @@ def process_scene(
     stride: int = 256,
     min_valid_frac: float = 0.05,
     max_fill_frac: float = 0.5,
+    overwrite: bool = False,
 ) -> int:
     scene_id = scene_dir.name
     print(f"[처리 시작] {scene_id}")
@@ -122,7 +123,7 @@ def process_scene(
     print(f"  scene shape: ({H}, {W})")
 
     out_root.mkdir(parents=True, exist_ok=True)
-    n_saved = n_skipped_fill = n_skipped_label = 0
+    n_saved = n_skipped_fill = n_skipped_label = n_skipped_existing = 0
 
     pbar = tqdm(total=((H - patch_size) // stride + 1) * ((W - patch_size) // stride + 1),
                 desc=f"  {scene_id[:35]}", unit="patch", leave=False, ncols=100)
@@ -169,15 +170,22 @@ def process_scene(
             label = remap_labels(lr)
 
             # Zarr 저장
-            patch_path = str(out_root / f"{scene_id}_PATCH{n_saved}.zarr")
-            save_patch_zarr(patch_path, spectral, rgb, hsv, sobel, label)
+            patch_path = out_root / f"{scene_id}_PATCH{n_saved}.zarr"
+            if patch_path.exists() and not overwrite:
+                n_skipped_existing += 1
+                n_saved += 1
+                pbar.update(1)
+                continue
+            save_patch_zarr(str(patch_path), spectral, rgb, hsv, sobel, label)
 
             n_saved += 1
             pbar.update(1)
             pbar.set_postfix(saved=n_saved)
 
     pbar.close()
-    print(f"  ✓ {scene_id}: {n_saved} 저장, "
+    n_actually_saved = n_saved - n_skipped_existing
+    print(f"  ✓ {scene_id}: {n_actually_saved} 저장, "
+          f"{n_skipped_existing} 스킵(기존 파일), "
           f"{n_skipped_fill} 스킵(fill), {n_skipped_label} 스킵(라벨 부족)")
     print(f"    remap: {{1,2}}→0(no-cloud)  {{3,4}}→1(cloud)  {{0,255}}→255(ignore)")
     print(f"    출력: {out_root}")
@@ -198,6 +206,8 @@ if __name__ == "__main__":
     parser.add_argument("--stride",     type=int,   default=256)
     parser.add_argument("--min_valid_frac", type=float, default=0.05)
     parser.add_argument("--max_fill_frac",  type=float, default=0.5)
+    parser.add_argument("--overwrite", action="store_true", default=False,
+                        help="기존 패치 덮어쓰기. 미지정 시 이미 존재하는 패치는 건너뜀.")
     args = parser.parse_args()
 
     out_root = args.out_root if args.out_root else Path(DEFAULT_OUT[args.split])
@@ -211,4 +221,5 @@ if __name__ == "__main__":
         stride=args.stride,
         min_valid_frac=args.min_valid_frac,
         max_fill_frac=args.max_fill_frac,
+        overwrite=args.overwrite,
     )

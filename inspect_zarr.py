@@ -1,7 +1,7 @@
 """
 Zarr Patch Inspector & Visualizer for Landsat 8 Cloud Detection
 
-한때 h5를 썼다보니...
+한때 h5를 썼다보니... 이름이 inspect_h5였지만! 바꿈!!
 
 사용법:
     # 데이터 내용 출력 (텍스트)

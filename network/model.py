@@ -165,7 +165,7 @@ class Model:
     # Encoding / pseudo-labels
     # ------------------------------------------------------------------
     @staticmethod
-    def encode_label(out, label_gen=False, threshold=0.4):
+    def encode_label(out, label_gen=False, threshold=0.65):
         """
         Convert network output to class predictions.
         For label generation, only keep predictions with confidence ≥ threshold.

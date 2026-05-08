@@ -216,6 +216,98 @@ python train.py -e my_exp -st 0 -ip swirndsi -gpu 0 1   # 다중 GPU
 
 ---
 
+## 5. 결과 시각화
+
+### 씬 전체 비교: Fmask vs 모델 예측 vs Ground Truth (`compare_scene.py`)
+
+학습된 모델의 예측 결과를 씬 단위로 시각화합니다.
+왼쪽: Fmask(QA_PIXEL), 가운데: 모델 예측, 오른쪽: 수동 라벨(Ground Truth)로 구성된 3-panel PNG를 저장합니다.
+
+```bash
+cd /home/pyuncb/src
+
+WEDDELL=/earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea
+
+python compare_scene.py \
+    --scene_dir  $WEDDELL/2020/11/20201114/LC08_L1GT_188114_20201114_20210315_02_T2 \
+    --label_path label_code/labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \
+    --exp        swirndsi_trial2_stage0 \
+    --gpu        0 \
+    --out        vis_output/
+```
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--scene_dir` | 원본 Landsat 씬 디렉토리 | 필수 |
+| `--label_path` | 수동 라벨 GeoTIFF 경로 | 필수 |
+| `--exp` | 실험 이름 (`exp_data/` 하위) | 필수 |
+| `--gpu` | GPU ID | `0` |
+| `--out` | 결과 PNG 저장 디렉토리 | `vis_output/` |
+
+출력: `vis_output/{scene_id}_comparison.png`
+씬이 큰 경우(~7000×7000 px) 자동으로 다운샘플해서 저장합니다.
+
+---
+
+### 패치 단위 비교: Fmask vs 모델 예측 vs Ground Truth (`visualize_comparison.py`)
+
+개별 val/test zarr 패치에 대해 3-panel 비교 이미지를 생성합니다.
+원본 씬을 재스캔해 패치 좌표를 찾고 QA_PIXEL에서 Fmask를 읽어옵니다.
+
+```bash
+cd /home/pyuncb/src
+
+WEDDELL=/earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea
+
+# 단일 패치
+python visualize_comparison.py \
+    --patch data/VALIDATION_ZARR/LC08_L1GT_188114_20201114_20210315_02_T2_PATCH5.zarr \
+    --exp   swirndsi_trial2_stage0 \
+    --gpu   0
+
+# VALIDATION_ZARR 디렉토리에서 6개 랜덤 샘플
+python visualize_comparison.py \
+    --patch  data/VALIDATION_ZARR/ \
+    --exp    swirndsi_trial2_stage0 \
+    --sample 6 \
+    --gpu    0 \
+    --out    vis_output/
+```
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--patch` | zarr 패치 경로 또는 VALIDATION_ZARR 디렉토리 | 필수 |
+| `--exp` | 실험 이름 (`exp_data/` 하위) | 필수 |
+| `--label_dir` | 수동 라벨 TIF 디렉토리 | `label_code/labels` |
+| `--scene_dir` | 씬 디렉토리 직접 지정 (생략 시 자동 탐색) | — |
+| `--gpu` | GPU ID | `0` |
+| `--out` | 결과 PNG 저장 디렉토리 | `vis_output/` |
+| `--sample` | 디렉토리 지정 시 랜덤 샘플 수 | — |
+
+출력: `vis_output/{scene_id}_PATCH{n}_comparison.png`
+
+> **참고**: 패치마다 원본 씬을 재스캔하므로 패치당 10~30초 소요됩니다.
+> 씬 전체 비교는 `compare_scene.py`를 사용하세요.
+
+---
+
+### 패치 단위 검사 (`inspect_zarr.py`)
+
+개별 zarr 패치의 내용과 라벨 분포를 확인합니다.
+
+```bash
+# 단일 패치 내용 출력 (텍스트)
+python inspect_zarr.py data/VALIDATION_ZARR/LC08_L1GT_188114_..._PATCH5.zarr
+
+# 시각화 이미지 저장
+python inspect_zarr.py data/VALIDATION_ZARR/LC08_L1GT_188114_..._PATCH5.zarr --save
+
+# 여러 패치 랜덤 샘플링
+python inspect_zarr.py data/VALIDATION_ZARR/ --sample 9 --save --out output_vis/
+```
+
+---
+
 ## GitHub 토큰 발급 및 push 설정
 
 GitHub에 코드를 push할 때 HTTPS 인증이 필요합니다. 비밀번호 대신 Personal Access Token(PAT)을 사용합니다.

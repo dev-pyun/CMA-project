@@ -624,3 +624,124 @@ python inspect_zarr.py data/TRAIN_ZARR/..._PATCH5.zarr --save
 # prepared FCI 있는 VAL 패치 → 씬 오버뷰 + 빨간 박스 자동 표시
 python inspect_zarr.py data/VALIDATION_ZARR/..._PATCH5.zarr --save
 ```
+
+---
+
+## 2026-05-08 | scene_to_patches.py — 기존 패치 건너뛰기 / --overwrite 플래그 추가
+
+### 배경
+씬 처리 도중 중단되거나, 이미 생성된 씬을 재실행할 때 기존 패치를 덮어쓰지 않고 이어서 생성하는 기능 요청.
+
+### 구현 내용
+
+**`label_code/scene_to_patches.py`**:
+- `process_scene()` 에 `overwrite: bool = False` 파라미터 추가
+- 패치 저장 직전 `patch_path.exists() and not overwrite` 체크 → 존재 시 `n_saved`만 증가하고 실제 쓰기 건너뜀
+  - 그리드 순서가 결정론적이므로 `n_saved` 인덱스 일관성 유지됨
+- `n_skipped_existing` 카운터 추가, 완료 메시지에 출력
+- argparse에 `--overwrite` 플래그 추가 (`action="store_true"`, 기본값 `False`)
+
+### 사용법
+```bash
+# 기본 (이미 있는 패치 건너뜀 — 이어쓰기)
+python scene_to_patches.py --scene_dir $WEDDELL/... --label_path labels/...tif --split val
+
+# 기존 패치 덮어쓰기
+python scene_to_patches.py --scene_dir $WEDDELL/... --label_path labels/...tif --split val --overwrite
+```
+
+---
+
+## 2026-05-08 | MFB NUM_CLASSES 버그 수정
+
+### 문제
+`utils/MFB.py`의 `NUM_CLASSES = 6` 이 구버전(6-class) 코드 잔재로 남아 있어,
+`get_MFB_weights()` 가 6-element 가중치 벡터를 반환했지만 모델은 2-class(binary)라서
+`F.cross_entropy` 에서 `RuntimeError: weight tensor should be defined either for all or no classes` 발생.
+
+### 수정
+- `utils/MFB.py:18` — `NUM_CLASSES = 6` → `NUM_CLASSES = 2`
+
+---
+
+## 2026-05-08 | 결과 시각화 스크립트 추가
+
+### compare_scene.py (신규)
+씬 전체를 대상으로 **Fmask / 모델 예측 / Ground Truth** 3-panel PNG 생성.
+
+- 씬 전체 밴드(B1–B7, B9)를 로드해 256×256 패치로 분할 후 모델 추론
+- QA_PIXEL → `qa_pixel_to_binary()` 로 Fmask 생성
+- 수동 라벨 GeoTIFF를 `{1,2}→0, {3,4}→1, {0,255}→255` 로 remap해 GT 생성
+- 씬이 큰 경우(>2000px) 자동 다운샘플링
+
+```bash
+python compare_scene.py \
+    --scene_dir  $WEDDELL/2020/11/20201114/LC08_L1GT_188114_20201114_20210315_02_T2 \
+    --label_path label_code/labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \
+    --exp        swirndsi_trial2_stage0 \
+    --gpu        0
+```
+
+### visualize_comparison.py (신규)
+개별 val/test zarr 패치에 대한 3-panel 비교.
+씬을 재스캔해 패치 좌표를 찾고 QA_PIXEL을 읽어 Fmask를 생성함.
+패치당 씬 재스캔이 필요해 느리므로 씬 단위 비교는 `compare_scene.py` 권장.
+
+```bash
+# 단일 패치
+python visualize_comparison.py \
+    --patch data/VALIDATION_ZARR/LC08_L1GT_188114_20201114_20210315_02_T2_PATCH5.zarr \
+    --exp   swirndsi_trial2_stage0 \
+    --label_dir label_code/labels
+
+# 디렉토리에서 랜덤 샘플 6개
+python visualize_comparison.py \
+    --patch data/VALIDATION_ZARR/ \
+    --exp   swirndsi_trial2_stage0 \
+    --label_dir label_code/labels \
+    --sample 6
+```
+
+---
+
+## 2026-05-08 | train.py — validation loader batch_size 수정
+
+### 문제
+`setup_data(mode='test', path=VALID_PATH)` 호출 시 `batch_size` 인자가 누락되어
+validation DataLoader가 기본값(1)으로 동작하고 있었음.
+학습 1178개 배치 / validation 1178개 배치로 보여 validation이 느렸던 원인.
+
+### 수정
+- `train.py:119` — `setup_data(mode='test', path=VALID_PATH)` →
+  `setup_data(args.batch_size, mode='test', path=VALID_PATH)`
+
+batch_size=32 적용 시 validation이 ~37배 빠르게 진행됨 (1178 배치 → ~37 배치).
+
+---
+
+## 2026-05-08 | TRAINING_GUIDE.md 신규 생성
+
+### 내용
+Self-training 파이프라인 전체를 설명하는 종합 문서.
+
+- **파이프라인 개요**: 4-stage 진행 흐름 (Stage 0 QA_PIXEL → Stage 1–3 pseudo-label)
+- **데이터 포맷**: Zarr 패치 구조, 17채널 입력 텐서 레이아웃
+- **U-Net 아키텍처**: stage별 depth/filter 크기, 전체 forward 흐름 ASCII 다이어그램
+- **Median Frequency Balancing (MFB)**: 클래스 불균형 대응 가중치 계산 방법
+- **Early Stopping**: patience=10, val mIoU moving average 기준
+- **Pseudo-label 생성**: confidence threshold 0.65, nodata 전파 로직
+- **Data Augmentation**: 학습 시 적용되는 변환 종류
+- **전체 실행 예시**: stage 0부터 stage 3까지 커맨드 순서
+
+위치: `/home/pyuncb/src/TRAINING_GUIDE.md`
+
+---
+
+## 2026-05-08 | README.md — 결과 시각화 섹션 추가
+
+### 추가 내용
+
+README.md에 **"5. 결과 시각화"** 섹션 추가:
+- `compare_scene.py`: 씬 전체 Fmask / 모델 예측 / GT 3-panel 비교 사용법
+- `visualize_comparison.py`: 개별 zarr 패치 단위 3-panel 비교 사용법 (단일 / 랜덤 샘플링)
+- `inspect_zarr.py`: 패치 내부 시각화 사용법
