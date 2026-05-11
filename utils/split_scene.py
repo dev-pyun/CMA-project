@@ -279,11 +279,7 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
                 qa_full[:h, :w] = qa_data
                 label = qa_pixel_to_binary(qa_full)
 
-                # Skip patches with ANY no-data pixel
-                if np.any(label == BINARY_NODATA):
-                    n_skipped += 1
-                    patch_pbar.update(1)
-                    continue
+                # fill pixels remain as 255 (ignored in loss via ignore_index=255)
             else:
                 label = np.zeros((patch_size, patch_size), dtype=np.uint8)
 

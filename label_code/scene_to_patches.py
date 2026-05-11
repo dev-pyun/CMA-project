@@ -83,7 +83,7 @@ def process_scene(
     out_root: Path,
     patch_size: int = 256,
     stride: int = 256,
-    min_valid_frac: float = 0.05,
+    min_valid_frac: float = 0.30,
     max_fill_frac: float = 0.5,
     overwrite: bool = False,
 ) -> int:
@@ -204,7 +204,7 @@ if __name__ == "__main__":
                         help="출력 디렉토리 직접 지정 (지정 시 --split 무시)")
     parser.add_argument("--patch_size", type=int,   default=256)
     parser.add_argument("--stride",     type=int,   default=256)
-    parser.add_argument("--min_valid_frac", type=float, default=0.05)
+    parser.add_argument("--min_valid_frac", type=float, default=0.30)
     parser.add_argument("--max_fill_frac",  type=float, default=0.5)
     parser.add_argument("--overwrite", action="store_true", default=False,
                         help="기존 패치 덮어쓰기. 미지정 시 이미 존재하는 패치는 건너뜀.")

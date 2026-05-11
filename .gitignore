@@ -8,3 +8,5 @@ label_code/prepared/
 label_code/labels/
 
 *.pdf
+
+vis_output/

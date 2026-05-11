@@ -49,7 +49,7 @@ from dataset.network_input import get_inp_func
 from network.model import Model
 from utils.experiment import Experiment
 from utils.qa_pixel_mapping import qa_pixel_to_binary
-from utils.split_scene import find_qa_pixel_file
+from utils.split_scene import find_band_file, find_qa_pixel_file
 from utils.dir_paths import WEDDELL_SEA_SOURCE_PATH
 
 # ── 상수 ───────────────────────────────────────────────────────────────
@@ -184,6 +184,50 @@ def run_inference(patch_path: str, exp_name: str, gpu_id: list) -> np.ndarray:
     return pred[1:-1, 1:-1].astype(np.uint8)   # 패딩 제거
 
 
+# ── 씬 오버뷰 + 패치 위치 표시 ────────────────────────────────────────
+
+def make_scene_overview(scene_dir: Path, row: int, col: int,
+                         patch_size: int = PATCH_SIZE) -> np.ndarray | None:
+    """
+    씬의 B4 밴드를 썸네일로 축소하고 패치 위치를 빨간 박스로 표시.
+    반환: (H', W', 3) float32 ∈ [0,1]  또는  None (밴드 파일 없을 시)
+    """
+    bf = find_band_file(str(scene_dir), 'B4')
+    if bf is None:
+        return None
+
+    with rasterio.open(bf) as src:
+        H, W = src.height, src.width
+        max_px = 800
+        scale = max(1, max(H, W) // max_px)
+        out_h, out_w = H // scale, W // scale
+        data = src.read(1, out_shape=(out_h, out_w)).astype(np.float32)
+
+    valid = data[data > 0]
+    if valid.size:
+        p2, p98 = np.percentile(valid, [2, 98])
+        data = np.clip((data - p2) / (p98 - p2 + 1e-8), 0, 1)
+    else:
+        data = np.zeros_like(data)
+
+    thumb = np.stack([data, data, data], axis=-1)
+
+    # 패치 좌표를 썸네일 스케일로 변환
+    r0 = min(row // scale,        out_h - 1)
+    c0 = min(col // scale,        out_w - 1)
+    r1 = min((row + patch_size) // scale, out_h - 1)
+    c1 = min((col + patch_size) // scale, out_w - 1)
+    t  = max(2, scale // 2)   # 선 두께
+
+    red = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    thumb[r0:r1, c0:min(c0+t, out_w)] = red   # 왼쪽
+    thumb[r0:r1, max(c1-t, 0):c1]     = red   # 오른쪽
+    thumb[r0:min(r0+t, out_h), c0:c1] = red   # 위
+    thumb[max(r1-t, 0):r1, c0:c1]     = red   # 아래
+
+    return np.clip(thumb, 0, 1)
+
+
 # ── 오버레이 생성 ──────────────────────────────────────────────────────
 
 def overlay_mask(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -232,8 +276,8 @@ def visualize_patch(patch_path: str, exp_name: str, label_dir: str,
     rgb   = store['rgb'][:]                    # (H, W, 3) float32 ∈ [0,1]
     gt    = store['label'][:]                  # (H, W) uint8
 
-    # ── 플롯 ──
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=120)
+    # ── 플롯 (2×3 그리드) ──
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12), dpi=120)
 
     legend_patches = [
         mpatches.Patch(color=COLORS['cloud'],    label='Cloud'),
@@ -241,8 +285,9 @@ def visualize_patch(patch_path: str, exp_name: str, label_dir: str,
         mpatches.Patch(color=COLORS['ignore'],   label='Ignore/No-Data'),
     ]
 
+    # 상단 행: Fmask / 모델 예측 / GT
     for ax, title, mask in zip(
-            axes,
+            axes[0],
             ['Fmask (QA_PIXEL)', f'Model Prediction\n({exp_name})', 'Ground Truth (수동 라벨)'],
             [fmask, pred, gt]):
         ax.imshow(overlay_mask(rgb, mask))
@@ -251,12 +296,24 @@ def visualize_patch(patch_path: str, exp_name: str, label_dir: str,
         ax.legend(handles=legend_patches, loc='lower right', fontsize=8,
                   framealpha=0.8)
 
+    # 하단 행 (1,0) / (1,2): 비움
+    axes[1, 0].axis('off')
+    axes[1, 2].axis('off')
+
+    # 하단 행 (1,1): 씬 오버뷰 + 패치 위치
+    overview = make_scene_overview(scene_dir, row, col)
+    if overview is not None:
+        axes[1, 1].imshow(overview)
+        axes[1, 1].set_title(
+            f'Scene Overview  (row={row}, col={col})', fontsize=11)
+    axes[1, 1].axis('off')
+
     fig.suptitle(f"{scene_id}  PATCH{patch_idx}  (row={row}, col={col})",
-                 fontsize=10, y=1.01)
+                 fontsize=10)
     plt.tight_layout()
 
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{scene_id}_PATCH{patch_idx}_comparison.png")
+    out_path = os.path.join(out_dir, f"{scene_id}_PATCH{patch_idx}_{exp_name}_comparison.png")
     plt.savefig(out_path, bbox_inches='tight')
     plt.close()
     print(f"  저장: {out_path}")

@@ -745,3 +745,149 @@ README.md에 **"5. 결과 시각화"** 섹션 추가:
 - `compare_scene.py`: 씬 전체 Fmask / 모델 예측 / GT 3-panel 비교 사용법
 - `visualize_comparison.py`: 개별 zarr 패치 단위 3-panel 비교 사용법 (단일 / 랜덤 샘플링)
 - `inspect_zarr.py`: 패치 내부 시각화 사용법
+
+
+---
+
+## 2026-05-11 | split_scene.py — fill 픽셀 skip 제거 (ignore 처리로 전환)
+
+### 변경 이유
+기존에는 QA_PIXEL fill 픽셀(label=255)이 하나라도 있는 패치를 전체 버렸음.
+씬 경계 패치의 경우 95%+ 유효 픽셀을 가지고 있어도 전부 폐기되는 낭비 발생.
+`cross_entropy(ignore_index=255)`가 이미 255 픽셀을 loss에서 제외하므로,
+fill 픽셀을 그냥 255로 두고 저장해도 학습에 악영향 없음.
+
+### 수정 (`utils/split_scene.py:282-286`)
+```python
+# 이전
+if np.any(label == BINARY_NODATA):
+    n_skipped += 1
+    patch_pbar.update(1)
+    continue
+
+# 이후
+# fill pixels remain as 255 (ignored in loss via ignore_index=255)
+```
+
+### 효과
+- train 패치 수 증가 예상 (기존 5,110개 → 재생성 후 확인 필요)
+- fill 픽셀은 label=255로 유지 → loss 계산에서 자동 제외
+
+---
+
+## 2026-05-11 | scene_to_patches.py — min_valid_frac 기본값 변경 (5% → 30%)
+
+### 변경 이유
+labeled 비율 5~10%짜리 패치는 한 패치(65536px)에서 ignore(255)가 90%+ 이상이라
+val mIoU 계산에 기여하는 픽셀이 ~3000개 미만으로 통계적으로 노이즈에 가까움.
+30% 기준으로도 1030개 패치가 유지되며, 고아 패치 문제를 피하려면 전체 삭제 후 재생성 필요.
+
+### 수정
+- `label_code/scene_to_patches.py`
+  - `process_scene()` 기본값: `min_valid_frac=0.05` → `0.30`
+  - argparse 기본값 동일하게 변경
+
+### 주의
+`--overwrite`는 덮어씌우는 방식이라, threshold 변경 후 재생성 시 기존 패치를 전부 삭제하고 실행해야 함:
+```bash
+rm -rf data/VALIDATION_ZARR/*.zarr
+python label_code/scene_to_patches.py --scene_dir ... --label_path ... --split val
+```
+
+---
+
+## 2026-05-11 | visualize_comparison.py — GT 오프셋 진단 + val 패치 stale 문제 발견
+
+### 진단 과정
+사용자가 GT가 Fmask 대비 한 칸 오른쪽에 있는 것처럼 보인다고 보고.
+`diagnose_label_offset.py` 스크립트로 진단한 결과:
+- label TIF와 raw band의 좌표계 완전 일치 (픽셀 오프셋 0,0) → 오프셋 버그 아님
+- PATCH5는 all-cloud 패치라 진단 불가 (any cloud-heavy candidate → score 1.0)
+- 전체 val 패치 no_cloud 집계 결과 `0` → 원인 추적
+
+### 원인
+**zarr 패치 생성 이후에 no-cloud 영역(water/snow)을 추가 라벨링**하여
+stale zarr(옛 label 기준)와 현재 label TIF가 불일치.
+
+타임스탬프 비교:
+- `171110` STALE: zarr 13:06 < label 13:27
+- `177110` STALE: zarr 12:33 < label 13:47
+- `188114` STALE: zarr 2026-05-07 < label 2026-05-11
+- `181098` 패치 없음
+
+### diagnose_label_offset.py (신규)
+특정 zarr 패치의 label이 올바른 지리 위치에서 읽혔는지 판정하는 진단 스크립트.
+- label TIF vs raw band 공간 정보 비교
+- (row,col) / (row,col±stride) / (row±stride,col) 위치 후보별 일치율 계산
+- Fmask와의 일치율도 함께 출력
+
+---
+
+## 2026-05-11 | val 패치 재생성 — stale label 문제 수정
+
+### 문제
+zarr 패치 생성 후 no-cloud 영역(water/snow)을 추가 라벨링했으나, 기존 패치에는 반영되지 않음.
+`scene_to_patches.py` 실행 시점보다 나중에 label TIF가 수정된 씬(stale) 확인.
+
+| 씬 | 판정 | zarr 생성일 | label 수정일 |
+|---|---|---|---|
+| `165110` | OK | 2026-05-07 17:56 | 2026-05-07 16:50 |
+| `171110` | **STALE** | 2026-05-08 13:06 | 2026-05-08 13:27 |
+| `177110` | **STALE** | 2026-05-08 12:33 | 2026-05-08 13:47 |
+| `188114` | **STALE** | 2026-05-07 17:47 | 2026-05-11 10:44 |
+| `181098` | **패치 없음** | — | — |
+| `199110` | OK | 2026-05-07 17:49 | 2026-05-07 17:45 |
+
+### 조치
+stale 3개 씬 `--overwrite` 재생성 + `181098` 신규 생성
+
+```bash
+python label_code/scene_to_patches.py --scene_dir $WEDDELL/.../171110... --label_path ... --split val --overwrite
+python label_code/scene_to_patches.py --scene_dir $WEDDELL/.../177110... --label_path ... --split val --overwrite
+python label_code/scene_to_patches.py --scene_dir $WEDDELL/.../188114... --label_path ... --split val --overwrite
+python label_code/scene_to_patches.py --scene_dir $WEDDELL/.../181098... --label_path ... --split val
+```
+
+### 결과
+- 전체 val 패치: 1178 → **1519개** (181098 씬 341개 신규)
+- `181098` no_cloud=0 — water/snow 라벨 미입력 상태, 추후 재라벨링 필요
+
+**주의**: 현재 진행 중인 stage 1 학습은 변경 전 val 데이터로 진행 중. 다음 학습부터 반영됨.
+
+---
+
+## 2026-05-11 | compare_stages.sh 신규 + visualize_comparison.py 파일명 변경
+
+### compare_stages.sh (신규)
+랜덤 샘플링한 패치에 대해 stage0~3 전부를 한 번에 비교 시각화하는 파이프라인.
+
+- 패치를 **한 번만** 샘플링한 뒤 stage0→3 순서로 `visualize_comparison.py` 호출
+- 실험 디렉토리(`exp_data/{exp}_stageN`)가 없는 stage는 자동 스킵
+- 출력: `vis_output/{exp_base}_stages_{YYYYMMDD_HHMMSS}/`
+
+```bash
+./compare_stages.sh swirndsi_trial2          # 기본 5개 샘플, GPU 0
+./compare_stages.sh swirndsi_trial2 8 0      # 8개 샘플
+./compare_stages.sh swirndsi_trial2 5 "0 1"  # 멀티 GPU
+```
+
+### visualize_comparison.py 파일명 변경
+- 기존: `{scene_id}_PATCH{patch_idx}_comparison.png`
+- 변경: `{scene_id}_PATCH{patch_idx}_{exp_name}_comparison.png`
+
+stage가 다른 결과물이 같은 폴더에 저장될 때 덮어쓰기 방지 및 stage 식별 용이.
+
+---
+
+## 2026-05-11 | visualize_comparison.py — 씬 오버뷰 패널 추가 (2×3 그리드)
+
+### 변경 내용
+
+- 레이아웃을 **1×3 → 2×3** 으로 변경 (figsize 18×6 → 18×12)
+- **하단 (1,1) 위치**에 씬 전체 B4 밴드 썸네일 + 패치 위치 빨간 박스 패널 추가
+  - (1,0), (1,2) 는 비워둠 (`axis('off')`)
+- `make_scene_overview(scene_dir, row, col)` 함수 추가
+  - B4 밴드를 rasterio로 로드, 최대 800px 썸네일로 다운샘플 (rasterio `out_shape` 이용)
+  - 패치 위치(row, col)를 스케일 변환 후 빨간 사각형 테두리 그리기
+  - B4 파일 없을 시 `None` 반환 → 패널 빈칸으로 처리
+- `utils.split_scene.find_band_file` import 추가
