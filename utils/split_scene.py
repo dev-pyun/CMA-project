@@ -7,17 +7,23 @@ Landsat 8 data layout (per scene directory):
     *_QA_PIXEL.TIF                     (quality assessment)
     *_MTL.json                         (metadata)
 
-Output Zarr layout  (256 × 256 patches, one .zarr directory per patch):
-    spectral  (H, W, 8)  uint16   — B1–B7, B9 raw DN values
-    rgb       (H, W, 3)  float32  — percentile-normalised R(B4), G(B3), B(B2) ∈ [0,1]
-    hsv       (H, W, 3)  float32  — H, S, V derived from rgb ∈ [0,1]
-    sobel     (H, W, 3)  float32  — Sobel X, Y, Magnitude on luminance
-    label     (H, W)     uint8    — binary: 0=no-cloud, 1=cloud, 255=no-data
+Output Zarr layout (one .zarr directory per patch):
+    spectral  (H+2, W+2, 8)  uint16   — TOA reflectance ×10000; /10000 at load = [0,1]
+    rgb       (H+2, W+2, 3)  float32  — percentile-normalised R(B4), G(B3), B(B2) ∈ [0,1]
+    hsv       (H+2, W+2, 3)  float32  — H, S, V derived from rgb ∈ [0,1]
+    sobel     (H+2, W+2, 3)  float32  — Sobel X, Y, Magnitude on luminance
+    label     (H, W)         uint8    — binary: 0=no-cloud, 1=cloud, 255=no-data
+
+H=W=256 (patch_size). The 1-pixel border in features uses real neighboring pixels
+from the scene, zero-filled only at scene boundaries.  This eliminates patch-edge
+artifacts during inference without requiring overlapping patches.
 """
 
 import argparse
 import glob
+import json
 import logging
+import math
 import os
 import random
 import shutil
@@ -99,6 +105,53 @@ def find_qa_pixel_file(scene_dir):
         if matches:
             return matches[0]
     return None
+
+
+# ── TOA Reflectance conversion ─────────────────────────────────────────
+
+# Landsat 8 Collection 2 standardized rescaling factors (all bands, all scenes)
+_L8C2_REFL_MULT: float = 2.0e-5
+_L8C2_REFL_ADD:  float = -0.1
+
+# Weddell Sea source root — used to locate MTL files for scenes in TRAIN/VALID dirs
+_WEDDELL_SOURCE = '/earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea'
+
+
+def _find_mtl_file(scene_dir: str) -> str | None:
+    """Return path to MTL JSON in scene_dir, or None."""
+    matches = glob.glob(os.path.join(scene_dir, '*_MTL.json'))
+    return matches[0] if matches else None
+
+
+def _load_sun_sin(scene_dir: str) -> float:
+    """Return sin(sun_elevation_deg) for TOA correction; 1.0 if MTL unavailable."""
+    mtl_path = _find_mtl_file(scene_dir)
+    if mtl_path is None:
+        logger.warning(f'MTL not found for {os.path.basename(scene_dir)}, '
+                       f'skipping sun-angle correction.')
+        return 1.0
+    try:
+        with open(mtl_path) as f:
+            meta = json.load(f)
+        elev = meta['LANDSAT_METADATA_FILE']['IMAGE_ATTRIBUTES']['SUN_ELEVATION']
+        return math.sin(math.radians(float(elev)))
+    except Exception as e:
+        logger.warning(f'Failed to read sun elevation from {mtl_path}: {e}')
+        return 1.0
+
+
+def _dn_to_toa_uint16(spectral: np.ndarray, sun_sin: float = 1.0) -> np.ndarray:
+    """DN uint16 → TOA reflectance stored as uint16 (x10000).
+
+    Formula: rho = clip((2e-5 * DN - 0.1) / sin(sun_elevation), 0, 1)
+    Stored as (rho * 10000).astype(uint16) so patch_dataset.py's /10000 gives
+    physical reflectance in [0, 1].
+    """
+    refl = np.clip(
+        (spectral.astype(np.float32) * _L8C2_REFL_MULT + _L8C2_REFL_ADD) / sun_sin,
+        0.0, 1.0,
+    )
+    return (refl * 10000).astype(np.uint16)
 
 
 # ── Derived feature computation ────────────────────────────────────────
@@ -237,10 +290,16 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
         img_height = ref.height
         img_width  = ref.width
 
+    # TOA sun-angle correction factor (once per scene)
+    sun_sin = _load_sun_sin(scene_dir)
+    logger.info(f'  {scene_name}: sun_sin={sun_sin:.4f}')
+
     step        = patch_size - overlap
     n_patches_y = max(1, (img_height - overlap) // step)
     n_patches_x = max(1, (img_width  - overlap) // step)
     total_patches = n_patches_y * n_patches_x
+    PAD = 1  # 1px real border added to each side of spectral/rgb/hsv/sobel
+    padded_size = patch_size + 2 * PAD  # 258
 
     os.makedirs(out_folder, exist_ok=True)
     n_saved   = 0
@@ -258,19 +317,37 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
         for ix in range(n_patches_x):
             row_start = max(0, min(iy * step, img_height - patch_size))
             col_start = max(0, min(ix * step, img_width  - patch_size))
-            win = windows.Window(col_start, row_start, patch_size, patch_size)
 
-            # Read spectral bands → (H, W, 8) uint16
-            spectral = np.zeros((patch_size, patch_size, N_SPECTRAL), dtype=np.uint16)
+            # ── 258×258 window for spectral/derived features (1px real border) ──
+            row_pad_start = max(0, row_start - PAD)
+            col_pad_start = max(0, col_start - PAD)
+            row_pad_end   = min(img_height, row_start + patch_size + PAD)
+            col_pad_end   = min(img_width,  col_start + patch_size + PAD)
+            read_h = row_pad_end - row_pad_start
+            read_w = col_pad_end - col_pad_start
+            # off = 1 when at scene edge (no border pixel available → canvas[0] stays 0)
+            # off = 0 when interior (border pixel occupies canvas[0])
+            off_r  = 1 if row_pad_start == row_start else 0
+            off_c  = 1 if col_pad_start == col_start else 0
+            win_pad = windows.Window(col_pad_start, row_pad_start, read_w, read_h)
+
+            # Read spectral bands → (258, 258, 8) DN uint16, zero at scene boundary
+            spectral = np.zeros((padded_size, padded_size, N_SPECTRAL), dtype=np.uint16)
             for ch, bk in enumerate(ALL_BANDS):
                 if bk not in band_files:
                     continue
                 with raster_open(band_files[bk]) as src:
-                    data = src.read(1, window=win)
+                    data = src.read(1, window=win_pad)
                 h, w = data.shape
-                spectral[:h, :w, ch] = data
+                spectral[off_r:off_r + h, off_c:off_c + w, ch] = data
 
-            # QA_PIXEL → binary label
+            # DN → TOA reflectance ×10000 (uint16, loaded as /10000 = reflectance)
+            spectral = _dn_to_toa_uint16(spectral, sun_sin=sun_sin)
+
+            # ── 256×256 window for label (center only, stride unchanged) ──
+            win = windows.Window(col_start, row_start, patch_size, patch_size)
+
+            # QA_PIXEL → binary label (256×256)
             if qa_file:
                 with raster_open(qa_file) as src:
                     qa_data = src.read(1, window=win)
@@ -279,7 +356,12 @@ def split_scene_to_patches(scene_dir, out_folder, mode='train',
                 qa_full[:h, :w] = qa_data
                 label = qa_pixel_to_binary(qa_full)
 
-                # fill pixels remain as 255 (ignored in loss via ignore_index=255)
+                # Skip patches where every pixel is fill (no valid data at all)
+                if np.all(label == BINARY_NODATA):
+                    n_skipped += 1
+                    patch_pbar.update(1)
+                    continue
+                # Remaining fill pixels stay as 255 (ignored in loss via ignore_index=255)
             else:
                 label = np.zeros((patch_size, patch_size), dtype=np.uint8)
 

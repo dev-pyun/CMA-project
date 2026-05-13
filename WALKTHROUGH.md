@@ -128,6 +128,65 @@
 
 ---
 
+## [2026-05-13] 패치 경계 격자 아티팩트 제거 + TOA Reflectance 변환
+
+### 배경 및 목표
+- 모델 추론 시 256×256 패치 경계에서 격자(grid) 아티팩트 발생 확인
+- 원인: stride=256으로 non-overlapping 패치 추론 시, 각 패치 경계 픽셀이 인접 패치의 실제 픽셀을 참조하지 못하고 zero padding으로 대체되어 경계 불연속성 발생
+- 추가: DN값 대신 TOA Reflectance를 학습에 사용 (물리적 의미 + 씬 간 일관성 향상)
+
+### 수정 내용
+
+#### 1. `utils/split_scene.py`
+- **258×258 패치 추출**: 256×256 중심 + 1px 실제 인접 픽셀 (씬 경계는 zero-fill)
+  - `row_pad_start/end`, `col_pad_start/end`로 확장된 rasterio window 설정
+  - `off_r/off_c`: 씬 경계 여부에 따라 canvas 내 쓰기 시작 위치 결정
+  - `off = 1` when at scene edge (no border → canvas[0] stays 0), `off = 0` otherwise
+- **TOA Reflectance 변환** 추가:
+  - `_find_mtl_file(scene_dir)`: 씬 폴더 내 MTL JSON 탐색
+  - `_load_sun_sin(scene_dir)`: MTL에서 태양 고도각 읽어 sin 값 반환 (없으면 1.0)
+  - `_dn_to_toa_uint16(spectral, sun_sin)`: `clip((2e-5×DN − 0.1) / sin(θ), 0, 1) × 10000` → uint16 저장
+  - 씬 단위로 `sun_sin` 계산 후 패치 루프에서 재사용
+- Zarr 포맷 변경: spectral `(256,256,8) DN uint16` → `(258,258,8) TOA×10000 uint16`
+- label은 `(256,256)` 그대로 유지 (stride 불변)
+
+#### 2. `dataset/patch_dataset.py`
+- 기존 zero padding 제거: `np.pad(full_input, ...)` 삭제
+- label을 transforms **이전**에 258×258로 패딩 (NODATA=255)
+  - transforms가 full_input(258×258)와 label(256→258)을 동일 크기로 처리 가능
+- `/10000` 로딩 그대로 유지 → TOA reflectance [0,1] 자동 획득
+
+#### 3. `compare_scene.py`
+- `_dn_to_toa_uint16`, `_load_sun_sin` import 추가
+- 씬 밴드 로드 직후 TOA 변환 적용 (sun_sin 포함)
+- 패치 루프에서 zero padding → **실제 인접 픽셀 258×258 추출**:
+  ```python
+  ri0, ri1 = max(0, i-1), min(H, i+PATCH_SIZE+1)
+  ci0, ci1 = max(0, j-1), min(W, j+PATCH_SIZE+1)
+  patch_pad = np.zeros((PATCH_SIZE+2, PATCH_SIZE+2, ...), dtype=spectral.dtype)
+  patch_pad[off_r:..., off_c:...] = spectral[ri0:ri1, ci0:ci1]
+  ```
+
+#### 4. `label_code/scene_to_patches.py`
+- 258×258 real border 추출 로직 추가 (split_scene.py와 동일)
+- `_dn_to_toa_uint16`, `_load_sun_sin` import 및 적용
+- `from rasterio import windows as rwin` import 위치 함수 외부로 이동
+
+### 기타 작업
+- TRAIN 씬 폴더에 MTL JSON 이미 symlink로 존재 확인 (source가 Weddell Sea 원본)
+- 기존 TRAIN_ZARR / VALIDATION_ZARR 전체 삭제 후 nohup으로 재생성 시작:
+  ```bash
+  nohup conda run -n remote python make_landsat_data.py --mode train > logs/make_train_zarr.log 2>&1 &
+  ```
+- VALIDATION 패치는 `label_code/scene_to_patches.py`로 별도 생성 (수동 라벨 기반)
+
+### TOA Reflectance ×10000 uint16 저장 이유
+- float32 저장 시 파일 크기 2배 → uint16 유지로 기존 크기 동일
+- `(reflectance × 10000).uint16` 저장 후 `/10000` 로드 = reflectance [0,1]
+- patch_dataset.py의 `/ 10000.0` 코드 변경 없이 자동 호환
+
+---
+
 ### 새 패치 생성 방법
 
 ```bash
@@ -891,3 +950,127 @@ stage가 다른 결과물이 같은 폴더에 저장될 때 덮어쓰기 방지 
   - 패치 위치(row, col)를 스케일 변환 후 빨간 사각형 테두리 그리기
   - B4 파일 없을 시 `None` 반환 → 패널 빈칸으로 처리
 - `utils.split_scene.find_band_file` import 추가
+
+---
+
+## 2026-05-11 | visualize_comparison.py — MIN_VALID_FRAC 불일치 버그 수정
+
+### 문제
+씬 오버뷰의 패치 위치(빨간 박스)가 잘못된 위치에 표시됨.
+
+### 원인
+`find_patch_coords()`가 패치 인덱스(PATCH121 등)로부터 (row, col) 좌표를 역산할 때
+`MIN_VALID_FRAC = 0.05` (5%) 를 사용하고 있었으나,
+`scene_to_patches.py`의 기준을 **0.30** (30%)으로 올린 이후 불일치 발생.
+
+유효 라벨 비율 5~30% 사이의 패치들이 `scene_to_patches.py`에서는 건너뛰어지지만
+`find_patch_coords()`에서는 포함되어 카운트 → 패치 인덱스 어긋남 → 좌표 오류.
+
+### 수정 (`visualize_comparison.py`)
+- `MIN_VALID_FRAC = 0.05` → `0.30`
+
+
+---
+
+## 2026-05-13 | visualize_comparison.py — 씬 오버뷰 FCI 변경 + fill 마스크 수정
+
+### 변경 내용
+
+**씬 오버뷰 FCI 변환** (`make_scene_overview()`):
+- 기존: B4 단일 밴드 흑백 썸네일
+- 변경: FCI (False Color Infrared) 컬러 합성
+  - R = B5 (NIR), G = B4 (Red), B = B3 (Green)
+  - 구름/눈/얼음이 붉은색, 식생이 초록색으로 보여 구름 구별이 용이
+- 패널 제목도 "Scene Overview" → "Scene FCI Overview"로 변경
+
+**fill 픽셀 마스크** (`visualize_patch()`):
+- 모델 예측에서 fill 픽셀(swath 밖, 스펙트럴=0)이 no-cloud(0)로 예측되는 문제 수정
+- `fill_mask = (fmask == 255) | (gt == 255)` → `pred[fill_mask] = 255`로 덮어씌움
+- 시각화 전용 수정, 모델 자체에는 영향 없음
+
+
+---
+
+## 2026-05-13 | compare_scene.py — 실행 방법 주석 보강
+
+docstring에 씬별 경로, 인자 설명, 6개 val 씬 목록, 출력 형식을 상세히 기술.
+
+---
+
+## 2026-05-13 | Gini 기반 패치 샘플링
+
+### 배경
+랜덤 샘플링 시 cloud/no-cloud 비율이 극단적인 패치(거의 전부 cloud이거나 전부 no-cloud)가
+선택되는 경우 비교 시각화의 의미가 떨어짐.
+
+### Gini impurity 정의
+3-class (0=no-cloud, 1=cloud, 255=ignore) Gini impurity:
+
+    gini = 1 - Σp_i²   (i ∈ {0, 1, 255})
+
+- 범위: [0, 2/3 ≈ 0.667]
+- 0 = 단일 클래스 (모두 같은 레이블)
+- 0.667 = 세 클래스가 1/3씩 균등 혼합
+
+### 수정 파일
+
+**`visualize_comparison.py`**:
+- `compute_gini(patch_path)` 함수 추가 — zarr label 읽어 3-class Gini 계산
+- `sample_by_gini(patch_dirs, n, min_gini)` 함수 추가 — 필터 후 랜덤 샘플링
+- `--min_gini` 인자 추가 (기본 0.0=필터 없음, 권장 0.1~0.3)
+- `--list_only` 플래그 추가 — 경로만 출력하고 추론 실행 안 함 (bash 파이프용)
+
+**`compare_stages.sh`**:
+- `[min_gini]` 5번째 인자 추가 (기본 0.1)
+- `shuf -n N` → Python `--list_only` 호출로 교체
+  - `visualize_comparison.py --list_only`가 Gini 필터+샘플링 결과를 stdout으로 출력
+  - `mapfile`로 받아서 PATCHES 배열에 저장
+
+
+---
+
+## 2026-05-13 | compare_scene.py — GT 선택적, 씬별 폴더 분리 저장
+
+### 변경 내용
+
+- `--label_path` 인자를 **선택 사항**으로 변경 (train 씬 지원)
+- 단일 합성 이미지 → **씬별 폴더 + 개별 파일** 구조로 변경
+  ```
+  vis_output/{scene_id}/fmask.png
+  vis_output/{scene_id}/model_{exp_name}.png
+  vis_output/{scene_id}/ground_truth.png  ← label_path 있을 때만
+  ```
+- `_save_panel()` 헬퍼 함수 추가 (단일 패널 저장)
+- `compare_scene()` 시그니처: `label_path` 위치를 키워드 인자로 변경
+
+
+---
+
+## 2026-05-13 | compare_scene.py — 씬 가장자리 미처리 strip 수정
+
+### 문제
+추론 루프가 `range(0, H-256+1, 256)` 으로 정의되어 마지막 stride 이후 edge 영역이 미처리됨.
+188115 씬 기준: 우측 105px + 하단 251px 가 pred_map 초기값(255=회색)으로 남음.
+Weddell Sea ocean 위에 dark grey(0.10) 오버레이가 55% alpha로 얹히면 배경(어두운 물)이 그대로 비쳐보여 "투명하게 뚫린" 것처럼 보임.
+
+### 수정
+`make_coords()` 함수 추가: 마지막 좌표가 씬 끝까지 커버 못 할 경우 `length - PATCH_SIZE` 를 끝에 추가.
+
+
+
+---
+
+## 2026-05-13 | compare_scene.py — cloud 색상 + fill masking 수정
+
+### 문제 (연회색 현상)
+cloud 오버레이 색상이 순백색 (1.0, 1.0, 1.0) 이라, alpha blending 시 어두운 배경(water, cloud shadow)에서는 연회색으로 나타남.
+- 밝은 얼음 배경(0.9) + white × α=0.8 → 0.98 = 흰색 ✓
+- 어두운 물 배경(0.05) + white × α=0.8 → 0.81 = **연회색** ✗
+
+또한 fill 픽셀(QA_PIXEL bit 0, spectral=0)이 모델을 통과해 class 0 또는 1로 예측되어, Fmask 패널의 진회색(255) 표시와 불일치.
+
+### 수정
+1. **cloud 색상 변경**: `(1.0, 1.0, 1.0)` 흰색 → `(0.53, 0.81, 0.98)` 하늘색
+   - 하늘색(saturated)은 어두운/밝은 배경 모두에서 동일하게 하늘색으로 보임
+2. **fill pixel masking 추가**: 추론 직후 `pred[fmask == 255] = 255` 적용
+   - fill 영역은 모델 예측 무시, no-data(진회색)로 표시

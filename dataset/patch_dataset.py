@@ -5,12 +5,14 @@ Loads patches created by utils/split_scene.py and serves them as
 (input_tensor, labels, filename) tuples for training and validation.
 
 Zarr patch layout (one .zarr directory per patch):
-    spectral  (H, W, 8)  uint16   — B1–B7, B9 raw DN
-    rgb       (H, W, 3)  float32  — percentile-normalised RGB ∈ [0,1]
-    hsv       (H, W, 3)  float32  — H, S, V ∈ [0,1]
-    sobel     (H, W, 3)  float32  — Sobel X, Y, Magnitude
-    label     (H, W)     uint8    — binary: 0=no-cloud, 1=cloud, 255=no-data
-    pseudo_label (H, W)  uint8    — added by label_generation.py (stage 1+)
+    spectral     (H+2, W+2, 8)  uint16  — B1–B7, B9 raw DN; 1px real border
+    rgb          (H+2, W+2, 3)  float32 — percentile-normalised RGB ∈ [0,1]
+    hsv          (H+2, W+2, 3)  float32 — H, S, V ∈ [0,1]
+    sobel        (H+2, W+2, 3)  float32 — Sobel X, Y, Magnitude
+    label        (H, W)         uint8   — binary: 0=no-cloud, 1=cloud, 255=no-data
+    pseudo_label (H, W)         uint8   — added by label_generation.py (stage 1+)
+
+H=W=256. Features are 258×258 with a real 1-pixel border from the scene.
 
 Input tensor channel layout (17 channels):
     0–7   : B1–B7, B9  (float32, /10000 normalised)
@@ -229,16 +231,17 @@ class PatchDataset(Dataset):
         else:
             label = store['label'][:]
 
-        label = label[:, :, None]  # (H, W, 1)
+        label = label[:, :, None]  # (H, W, 1) = (256, 256, 1)
 
-        # ── Augmentation ────────────────────────────────────────────────
+        # ── Pad label to 258×258 with NODATA before transforms ──────────
+        # full_input is already (H+2, W+2, 17) from zarr; label needs to
+        # match spatially so flips/rotations are applied consistently.
+        p2d   = ((1, 1), (1, 1), (0, 0))
+        label = np.pad(label, p2d, 'constant', constant_values=NODATA_LABEL)
+
+        # ── Augmentation (both 258×258) ──────────────────────────────────
         if self.mode == 'train' and self.transforms is not None:
             full_input, label = self.transforms([full_input, label])
-
-        # ── Padding (1-pixel border) ─────────────────────────────────────
-        p2d        = ((1, 1), (1, 1), (0, 0))
-        full_input = np.pad(full_input, p2d, 'constant', constant_values=0)
-        label      = np.pad(label, p2d, 'constant', constant_values=NODATA_LABEL)
 
         # ── HWC → CHW ────────────────────────────────────────────────────
         full_input = np.transpose(full_input, (2, 0, 1))          # (17, H+2, W+2)

@@ -1,18 +1,59 @@
 """
 씬 전체 비교 시각화: Fmask | 모델 예측 | Ground Truth
 
-Usage:
-    python compare_scene.py \
-        --scene_dir /earth00_home/.../LC08_L1GT_188114_20201114_20210315_02_T2 \
-        --label_path label_code/labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \
-        --exp swirndsi_trial2_stage0 \
-        [--gpu 0] \
-        [--out vis_output/]
+씬 전체를 256×256 패치로 분할해 모델 추론 후, 씬 전체 지도로 합쳐서 시각화.
+수동 라벨이 있는 validation 씬(6개)에서 사용.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+실행 예시
+
+  # GT 있는 val 씬 (fmask.png + model_*.png + ground_truth.png 생성)
+    cd /home/pyuncb/src
+    conda run -n remote python compare_scene.py \
+        --scene_dir /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea/2020/11/20201114/LC08_L1GT_188114_20201114_20210315_02_T2 \
+        --label_path label_code/labels/LC08_L1GT_188114_20201114_20210315_02_T2_labels.tif \
+        --exp swirndsi_trial2_stage3
+
+  # GT 없는 train 씬 (fmask.png + model_*.png 만 생성)
+    conda run -n remote python compare_scene.py \
+        --scene_dir /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea/2020/11/20201114/LC08_L1GT_188115_20201114_20210315_02_T2 \
+        --exp swirndsi_trial2_stage3
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+인자 설명:
+
+  --scene_dir   원본 Landsat L1 씬 폴더 (*_B1.TIF 등이 있는 폴더)
+                경로 패턴: {WEDDELL}/{year}/{month}/{date}/{scene_id}/
+                WEDDELL = /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea
+
+  --label_path  수동 라벨 GeoTIFF (label_code/labels/ 아래에 위치)
+                파일명 패턴: {scene_id}_labels.tif
+
+  --exp         실험 이름 (exp_data/ 아래 폴더명)
+                현재 사용 가능한 실험:
+                  swirndsi_trial2_stage0  (stage 0, 가장 기본)
+                  swirndsi_trial2_stage1
+                  swirndsi_trial2_stage2
+                  swirndsi_trial2_stage3  (최신, 권장)
+
+  --gpu         GPU ID (기본: 0). 멀티 GPU: --gpu 0 1
+  --out         결과 저장 디렉토리 (기본: vis_output/)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+라벨 가능한 6개 val 씬 목록 (scene_dir / label_path 쌍):
+
+  165110  2020/03/20200302  LC08_L1GT_165110_20200302_20201016_02_T2
+  171110  2020/02/20200225  LC08_L1GT_171110_20200225_20201016_02_T2
+  177110  2020/02/20200219  LC08_L1GT_177110_20200219_20201016_02_T2
+  181098  2020/04/20200419  LC08_L1GT_181098_20200419_20201016_02_T2
+  188114  2020/11/20201114  LC08_L1GT_188114_20201114_20210315_02_T2
+  199110  2020/01/20200128  LC08_L1GT_199110_20200128_20201016_02_T2
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 출력:
-    Left   : RGB + Fmask 오버레이
-    Center : RGB + 모델 예측 오버레이
-    Right  : RGB + Ground Truth 오버레이 (수동 라벨)
+  vis_output/{scene_id}/fmask.png             — Fmask 오버레이
+  vis_output/{scene_id}/model_{exp}.png       — 모델 예측 오버레이
+  vis_output/{scene_id}/ground_truth.png      — GT 오버레이 (--label_path 지정 시만)
 """
 
 import argparse
@@ -41,6 +82,7 @@ from utils.split_scene import (
     find_band_file, find_qa_pixel_file,
     compute_rgb, compute_hsv, compute_sobel,
     _percentile_normalize,
+    _dn_to_toa_uint16, _load_sun_sin,
 )
 
 PATCH_SIZE = 256
@@ -49,10 +91,10 @@ NODATA_VAL = 255
 
 COLORS = {
     0:   (0.13, 0.55, 0.13),   # 초록  — no-cloud
-    1:   (1.00, 1.00, 1.00),   # 흰색  — cloud
+    1:   (0.53, 0.81, 0.98),   # 하늘색 — cloud (배경 무관하게 하늘색으로 보임)
     255: (0.10, 0.10, 0.10),   # 진회색 — ignore/no-data
 }
-ALPHA = 0.55
+ALPHA = 0.8
 
 
 # ── 씬 전체 밴드 로드 ──────────────────────────────────────────────────
@@ -111,30 +153,44 @@ def run_scene_inference(spectral: np.ndarray, exp_name: str,
     H, W   = spectral.shape[:2]
     pred_map = np.full((H, W), NODATA_VAL, dtype=np.uint8)
 
-    rows = list(range(0, H - PATCH_SIZE + 1, STRIDE))
-    cols = list(range(0, W - PATCH_SIZE + 1, STRIDE))
+    # 마지막 패치가 오른쪽/아래 가장자리까지 커버하도록 끝값 보장
+    def make_coords(length: int) -> list[int]:
+        coords = list(range(0, length - PATCH_SIZE + 1, STRIDE))
+        if not coords or coords[-1] + PATCH_SIZE < length:
+            coords.append(length - PATCH_SIZE)
+        return coords
+
+    rows = make_coords(H)
+    cols = make_coords(W)
     total = len(rows) * len(cols)
 
     print(f"  모델 추론 ({total} 패치)...")
     with torch.no_grad():
         for i in tqdm(rows, leave=False):
             for j in cols:
-                patch = spectral[i:i+PATCH_SIZE, j:j+PATCH_SIZE]
+                # 학습 시와 동일하게 258×258 추출 (1px 실제 인접 픽셀)
+                ri0 = max(0, i - 1);  ri1 = min(H, i + PATCH_SIZE + 1)
+                ci0 = max(0, j - 1);  ci1 = min(W, j + PATCH_SIZE + 1)
+                off_r = i - ri0       # 0 at top edge, else 1
+                off_c = j - ci0       # 0 at left edge, else 1
 
-                # 패치별 파생 피처 계산 (학습 시와 동일)
-                rgb_p   = compute_rgb(patch)
+                patch_pad = np.zeros(
+                    (PATCH_SIZE + 2, PATCH_SIZE + 2, spectral.shape[2]),
+                    dtype=spectral.dtype)
+                patch_pad[off_r:off_r + (ri1 - ri0),
+                          off_c:off_c + (ci1 - ci0)] = spectral[ri0:ri1, ci0:ci1]
+
+                rgb_p   = compute_rgb(patch_pad)
                 hsv_p   = compute_hsv(rgb_p)
                 sobel_p = compute_sobel(rgb_p)
 
                 full = np.concatenate(
-                    [patch.astype(np.float32) / 10000.0, rgb_p, hsv_p, sobel_p],
+                    [patch_pad.astype(np.float32) / 10000.0, rgb_p, hsv_p, sobel_p],
                     axis=-1,
-                )  # (256, 256, 17)
+                )  # (258, 258, 17) — zero padding 없음
 
-                # 1px 패딩 → 모델 입력
-                full = np.pad(full, ((1,1),(1,1),(0,0)), constant_values=0)
-                inp  = torch.from_numpy(
-                    np.transpose(full, (2,0,1))[None]
+                inp = torch.from_numpy(
+                    np.transpose(full, (2, 0, 1))[None]
                 ).float()
 
                 out  = model.network(inp_func(inp.to(device)))
@@ -170,8 +226,29 @@ def remap_gt(labels_raw: np.ndarray) -> np.ndarray:
 
 # ── 메인 ─────────────────────────────────────────────────────────────
 
-def compare_scene(scene_dir: str, label_path: str, exp_name: str,
-                  gpu_id: list, out_dir: str):
+def _save_panel(rgb_v: np.ndarray, mask: np.ndarray,
+                title: str, out_path: str, suptitle: str):
+    """단일 패널 이미지를 파일로 저장."""
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10), dpi=120)
+    legend_patches = [
+        mpatches.Patch(color=COLORS[1],   label='Cloud'),
+        mpatches.Patch(color=COLORS[0],   label='No-Cloud'),
+        mpatches.Patch(color=COLORS[255], label='Ignore/No-Data'),
+    ]
+    ax.imshow(overlay_mask(rgb_v, mask))
+    ax.set_title(title, fontsize=13)
+    ax.axis('off')
+    ax.legend(handles=legend_patches, loc='lower right',
+              fontsize=9, framealpha=0.8)
+    fig.suptitle(suptitle, fontsize=10)
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches='tight')
+    plt.close()
+
+
+def compare_scene(scene_dir: str, exp_name: str,
+                  gpu_id: list, out_dir: str,
+                  label_path: str = None):
 
     scene_id = Path(scene_dir).name
     print(f"\n[{scene_id}]")
@@ -182,6 +259,11 @@ def compare_scene(scene_dir: str, label_path: str, exp_name: str,
     H, W     = spectral.shape[:2]
     print(f"  씬 크기: {H} × {W}")
 
+    # DN → TOA reflectance ×10000 (학습 파이프라인과 동일)
+    sun_sin = _load_sun_sin(scene_dir)
+    print(f"  TOA 변환 (sun_sin={sun_sin:.4f})...")
+    spectral = _dn_to_toa_uint16(spectral, sun_sin=sun_sin)
+
     print("  RGB 생성...")
     rgb = load_scene_rgb(spectral)
 
@@ -191,59 +273,53 @@ def compare_scene(scene_dir: str, label_path: str, exp_name: str,
         qa = src.read(1).astype(np.uint16)
     fmask = qa_pixel_to_binary(qa)
 
-    print("  GT 라벨 로딩...")
-    with rasterio.open(label_path) as src:
-        labels_raw = src.read(1).astype(np.uint8)
-    gt = remap_gt(labels_raw)
-
     # ── 모델 추론 ──
     pred = run_scene_inference(spectral, exp_name, gpu_id)
+    pred[fmask == 255] = 255   # fill 픽셀은 모델 예측 무시, no-data로 표시
 
-    # ── 시각화 ──
-    print("  플롯 생성...")
-    # 큰 씬이므로 다운샘플링해서 저장
-    scale = max(1, H // 2000)   # 최대 ~2000px
+    # ── 다운샘플링 ──
+    scale = max(1, H // 2000)
     if scale > 1:
         def ds(arr):
             return arr[::scale, ::scale]
-        rgb_v, fmask_v, pred_v, gt_v = ds(rgb), ds(fmask), ds(pred), ds(gt)
+        rgb_v, fmask_v, pred_v = ds(rgb), ds(fmask), ds(pred)
         print(f"  표시 해상도: {rgb_v.shape[:2]} (1/{scale} 다운샘플)")
     else:
-        rgb_v, fmask_v, pred_v, gt_v = rgb, fmask, pred, gt
+        rgb_v, fmask_v, pred_v = rgb, fmask, pred
 
-    fig, axes = plt.subplots(1, 3, figsize=(21, 7), dpi=120)
-    legend_patches = [
-        mpatches.Patch(color=COLORS[1],   label='Cloud'),
-        mpatches.Patch(color=COLORS[0],   label='No-Cloud'),
-        mpatches.Patch(color=COLORS[255], label='Ignore/No-Data'),
-    ]
-    for ax, title, mask in zip(
-            axes,
-            ['Fmask (QA_PIXEL)', f'Model: {exp_name}', 'Ground Truth'],
-            [fmask_v, pred_v, gt_v]):
-        ax.imshow(overlay_mask(rgb_v, mask))
-        ax.set_title(title, fontsize=13)
-        ax.axis('off')
-        ax.legend(handles=legend_patches, loc='lower right',
-                  fontsize=9, framealpha=0.8)
+    # ── 씬별 출력 폴더 ──
+    scene_out = os.path.join(out_dir, scene_id)
+    os.makedirs(scene_out, exist_ok=True)
 
-    fig.suptitle(scene_id, fontsize=11)
-    plt.tight_layout()
+    # ── Fmask 저장 ──
+    fmask_path = os.path.join(scene_out, "fmask.png")
+    _save_panel(rgb_v, fmask_v, 'Fmask (QA_PIXEL)', fmask_path, scene_id)
+    print(f"  저장: {fmask_path}")
 
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{scene_id}_comparison.png")
-    plt.savefig(out_path, bbox_inches='tight')
-    plt.close()
-    print(f"  저장: {out_path}")
+    # ── Model Prediction 저장 ──
+    pred_path = os.path.join(scene_out, f"model_{exp_name}.png")
+    _save_panel(rgb_v, pred_v, f'Model: {exp_name}', pred_path, scene_id)
+    print(f"  저장: {pred_path}")
+
+    # ── GT 저장 (label_path 제공 시에만) ──
+    if label_path:
+        print("  GT 라벨 로딩...")
+        with rasterio.open(label_path) as src:
+            labels_raw = src.read(1).astype(np.uint8)
+        gt = remap_gt(labels_raw)
+        gt_v = gt[::scale, ::scale] if scale > 1 else gt
+        gt_path = os.path.join(scene_out, "ground_truth.png")
+        _save_panel(rgb_v, gt_v, 'Ground Truth (수동 라벨)', gt_path, scene_id)
+        print(f"  저장: {gt_path}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
 
 def get_args():
-    p = argparse.ArgumentParser(description='씬 전체 Fmask/모델/GT 비교')
+    p = argparse.ArgumentParser(description='씬 전체 Fmask/모델(/GT) 비교')
     p.add_argument('--scene_dir',   required=True)
-    p.add_argument('--label_path',  required=True,
-                   help='수동 라벨 GeoTIFF 경로')
+    p.add_argument('--label_path',  default=None,
+                   help='수동 라벨 GeoTIFF 경로 (생략 시 GT 패널 미생성 — train 씬에 사용)')
     p.add_argument('--exp',         required=True,
                    help='실험 이름 (e.g. swirndsi_trial2_stage0)')
     p.add_argument('--gpu',         type=int, nargs='+', default=[0])
@@ -255,8 +331,8 @@ if __name__ == '__main__':
     args = get_args()
     compare_scene(
         scene_dir  = args.scene_dir,
-        label_path = args.label_path,
         exp_name   = args.exp,
         gpu_id     = args.gpu,
         out_dir    = args.out,
+        label_path = args.label_path,
     )

@@ -1,5 +1,5 @@
 """
-라벨된 Landsat 씬 → 256×256 Zarr patch 분할.
+라벨된 Landsat 씬 → 258×258 Zarr patch 분할 (1px real border 포함).
 
 학습 파이프라인과 완전히 동일한 포맷으로 저장하므로
 patch_dataset.py 가 training/validation/test 패치를 구분 없이 로딩 가능.
@@ -9,11 +9,11 @@ patch_dataset.py 가 training/validation/test 패치를 구분 없이 로딩 가
             0=미라벨, 1=water, 2=snow, 3=shadow, 4=cloud, 255=fill
 
 출력  : <out_root>/<scene_id>_PATCH{n}.zarr
-            spectral/  (H,W,8)  uint16 — B1-B7, B9 raw DN
-            rgb/       (H,W,3)  float32
-            hsv/       (H,W,3)  float32
-            sobel/     (H,W,3)  float32
-            label/     (H,W)    uint8   — remap 후: 0=no-cloud, 1=cloud, 255=ignore
+            spectral/  (H+2,W+2,8)  uint16 — TOA reflectance ×10000 (1px real border)
+            rgb/       (H+2,W+2,3)  float32
+            hsv/       (H+2,W+2,3)  float32
+            sobel/     (H+2,W+2,3)  float32
+            label/     (H,W)        uint8   — remap 후: 0=no-cloud, 1=cloud, 255=ignore
 
 label remap:
     {1(water), 2(snow)}      → 0  (no-cloud)
@@ -53,6 +53,7 @@ from utils.split_scene import (
     ALL_BANDS, N_SPECTRAL,
     find_band_file, find_qa_pixel_file,
     compute_rgb, compute_hsv, compute_sobel, save_patch_zarr,
+    _dn_to_toa_uint16, _load_sun_sin,
 )
 from utils.dir_paths import VALID_ZARR_PATH, TEST_ZARR_PATH
 
@@ -122,11 +123,20 @@ def process_scene(
         H, W = src.height, src.width
     print(f"  scene shape: ({H}, {W})")
 
+    # TOA 태양 고도각 보정 인수 (씬 단위)
+    sun_sin = _load_sun_sin(str(scene_dir))
+    print(f"  sun_sin={sun_sin:.4f}")
+
+    PAD = 1
+    padded_size = patch_size + 2 * PAD  # 258
+
     out_root.mkdir(parents=True, exist_ok=True)
     n_saved = n_skipped_fill = n_skipped_label = n_skipped_existing = 0
 
     pbar = tqdm(total=((H - patch_size) // stride + 1) * ((W - patch_size) // stride + 1),
                 desc=f"  {scene_id[:35]}", unit="patch", leave=False, ncols=100)
+
+    from rasterio import windows as rwin
 
     for i in range(0, H - patch_size + 1, stride):
         for j in range(0, W - patch_size + 1, stride):
@@ -134,9 +144,8 @@ def process_scene(
             lr = labels_raw[i:i + patch_size, j:j + patch_size]
 
             # fill 비율 체크 (QA_PIXEL Bit 0)
+            win = rwin.Window(j, i, patch_size, patch_size)
             with rasterio.open(qa_file) as src:
-                from rasterio import windows as rwin
-                win = rwin.Window(j, i, patch_size, patch_size)
                 qa_patch = src.read(1, window=win).astype(np.uint16)
             fill_frac = float((qa_patch & 1).astype(bool).mean())
             if fill_frac > max_fill_frac:
@@ -151,17 +160,29 @@ def process_scene(
                 pbar.update(1)
                 continue
 
-            # 스펙트럴 밴드 읽기 → (H, W, 8) uint16
-            spectral = np.zeros((patch_size, patch_size, N_SPECTRAL), dtype=np.uint16)
+            # 258×258 window (1px real border)
+            row_pad_start = max(0, i - PAD);  row_pad_end = min(H, i + patch_size + PAD)
+            col_pad_start = max(0, j - PAD);  col_pad_end = min(W, j + patch_size + PAD)
+            read_h = row_pad_end - row_pad_start
+            read_w = col_pad_end - col_pad_start
+            off_r  = 1 if row_pad_start == i else 0
+            off_c  = 1 if col_pad_start == j else 0
+            win_pad = rwin.Window(col_pad_start, row_pad_start, read_w, read_h)
+
+            # 스펙트럴 밴드 읽기 → (258, 258, 8) DN uint16
+            spectral = np.zeros((padded_size, padded_size, N_SPECTRAL), dtype=np.uint16)
             for ch, bk in enumerate(ALL_BANDS):
                 if bk not in band_files:
                     continue
                 with rasterio.open(band_files[bk]) as src:
-                    data = src.read(1, window=win)
+                    data = src.read(1, window=win_pad)
                 h, w = data.shape
-                spectral[:h, :w, ch] = data
+                spectral[off_r:off_r + h, off_c:off_c + w, ch] = data
 
-            # 파생 피처
+            # DN → TOA reflectance ×10000
+            spectral = _dn_to_toa_uint16(spectral, sun_sin=sun_sin)
+
+            # 파생 피처 (258×258)
             rgb   = compute_rgb(spectral)
             hsv   = compute_hsv(rgb)
             sobel = compute_sobel(rgb)
