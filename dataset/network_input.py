@@ -66,10 +66,10 @@ def _safe_ratio(num, den):
 
 
 def compute_NDSI(inp_img):
-    """NDSI = (Green - SWIR1) / (Green + SWIR1)"""
-    green = inp_img[:, BAND_INDEX['Green'], :, :]
+    """NDSI = (NIR - SWIR1) / (NIR + SWIR1)"""
+    nir = inp_img[:, BAND_INDEX['NIR'], :, :]
     swir1 = inp_img[:, BAND_INDEX['SWIR1'], :, :]
-    return _safe_ratio(green - swir1, green + swir1).unsqueeze(1)
+    return _safe_ratio(nir - swir1, nir + swir1).unsqueeze(1)
 
 
 def compute_NDWI(inp_img):
