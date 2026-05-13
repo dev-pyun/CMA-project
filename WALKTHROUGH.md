@@ -128,111 +128,6 @@
 
 ---
 
-## [2026-05-13] 패치 경계 격자 아티팩트 제거 + TOA Reflectance 변환
-
-### 배경 및 목표
-- 모델 추론 시 256×256 패치 경계에서 격자(grid) 아티팩트 발생 확인
-- 원인: stride=256으로 non-overlapping 패치 추론 시, 각 패치 경계 픽셀이 인접 패치의 실제 픽셀을 참조하지 못하고 zero padding으로 대체되어 경계 불연속성 발생
-- 추가: DN값 대신 TOA Reflectance를 학습에 사용 (물리적 의미 + 씬 간 일관성 향상)
-
-### 수정 내용
-
-#### 1. `utils/split_scene.py`
-- **258×258 패치 추출**: 256×256 중심 + 1px 실제 인접 픽셀 (씬 경계는 zero-fill)
-  - `row_pad_start/end`, `col_pad_start/end`로 확장된 rasterio window 설정
-  - `off_r/off_c`: 씬 경계 여부에 따라 canvas 내 쓰기 시작 위치 결정
-  - `off = 1` when at scene edge (no border → canvas[0] stays 0), `off = 0` otherwise
-- **TOA Reflectance 변환** 추가:
-  - `_find_mtl_file(scene_dir)`: 씬 폴더 내 MTL JSON 탐색
-  - `_load_sun_sin(scene_dir)`: MTL에서 태양 고도각 읽어 sin 값 반환 (없으면 1.0)
-  - `_dn_to_toa_uint16(spectral, sun_sin)`: `clip((2e-5×DN − 0.1) / sin(θ), 0, 1) × 10000` → uint16 저장
-  - 씬 단위로 `sun_sin` 계산 후 패치 루프에서 재사용
-- Zarr 포맷 변경: spectral `(256,256,8) DN uint16` → `(258,258,8) TOA×10000 uint16`
-- label은 `(256,256)` 그대로 유지 (stride 불변)
-
-#### 2. `dataset/patch_dataset.py`
-- 기존 zero padding 제거: `np.pad(full_input, ...)` 삭제
-- label을 transforms **이전**에 258×258로 패딩 (NODATA=255)
-  - transforms가 full_input(258×258)와 label(256→258)을 동일 크기로 처리 가능
-- `/10000` 로딩 그대로 유지 → TOA reflectance [0,1] 자동 획득
-
-#### 3. `compare_scene.py`
-- `_dn_to_toa_uint16`, `_load_sun_sin` import 추가
-- 씬 밴드 로드 직후 TOA 변환 적용 (sun_sin 포함)
-- 패치 루프에서 zero padding → **실제 인접 픽셀 258×258 추출**:
-  ```python
-  ri0, ri1 = max(0, i-1), min(H, i+PATCH_SIZE+1)
-  ci0, ci1 = max(0, j-1), min(W, j+PATCH_SIZE+1)
-  patch_pad = np.zeros((PATCH_SIZE+2, PATCH_SIZE+2, ...), dtype=spectral.dtype)
-  patch_pad[off_r:..., off_c:...] = spectral[ri0:ri1, ci0:ci1]
-  ```
-
-#### 4. `label_code/scene_to_patches.py`
-- 258×258 real border 추출 로직 추가 (split_scene.py와 동일)
-- `_dn_to_toa_uint16`, `_load_sun_sin` import 및 적용
-- `from rasterio import windows as rwin` import 위치 함수 외부로 이동
-
-### 기타 작업
-- TRAIN 씬 폴더에 MTL JSON 이미 symlink로 존재 확인 (source가 Weddell Sea 원본)
-- 기존 TRAIN_ZARR / VALIDATION_ZARR 전체 삭제 후 nohup으로 재생성 시작:
-  ```bash
-  nohup conda run -n remote python make_landsat_data.py --mode train > logs/make_train_zarr.log 2>&1 &
-  ```
-- VALIDATION 패치는 `label_code/scene_to_patches.py`로 별도 생성 (수동 라벨 기반)
-
-### TOA Reflectance ×10000 uint16 저장 이유
-- float32 저장 시 파일 크기 2배 → uint16 유지로 기존 크기 동일
-- `(reflectance × 10000).uint16` 저장 후 `/10000` 로드 = reflectance [0,1]
-- patch_dataset.py의 `/ 10000.0` 코드 변경 없이 자동 호환
-
----
-
-### 새 패치 생성 방법
-
-```bash
-# zarr 패치 생성 (기존 H5 패치와 별도로 TRAIN_ZARR/ 에 생성됨)
-pip install zarr numcodecs
-python make_landsat_data.py --mode train
-
-# 패치 내용 확인
-python inspect_zarr.py data/TRAIN_ZARR/LC08_..._PATCH0.zarr
-python inspect_zarr.py data/TRAIN_ZARR/ --sample 6 --save
-```
-
-### 학습 방법 (변경 없음)
-
-```bash
-python train.py -e my_exp -st 0 -ip swirndsi -gpu 0
-
-# 파생 피처 활용 예
-python train.py -e my_exp -st 0 -ip swirndsi_sobel -gpu 0
-python train.py -e my_exp -st 0 -ip all_derived -gpu 0
-```
-
----
-
-### 채널 레이아웃 (패치 내부)
-
-| zarr 배열 | shape | dtype | 설명 |
-|---|---|---|---|
-| `spectral` | (256,256,8) | uint16 | B1–B7, B9 raw DN |
-| `rgb` | (256,256,3) | float32 | B4/B3/B2 퍼센타일 정규화 [0,1] |
-| `hsv` | (256,256,3) | float32 | H,S,V [0,1] |
-| `sobel` | (256,256,3) | float32 | Sobel_X, Sobel_Y, Magnitude |
-| `label` | (256,256) | uint8 | 0=no-cloud, 1=cloud, 255=nodata |
-| `pseudo_label` | (256,256) | uint8 | stage 1+에서 label_generation.py가 추가 |
-
-### 학습 텐서 채널 레이아웃 (17채널)
-
-| 채널 | 이름 | 소스 |
-|---|---|---|
-| 0–7 | B1–B7, B9 | spectral/10000 |
-| 8–10 | RGB_R, RGB_G, RGB_B | zarr rgb 배열 |
-| 11–13 | HSV_H, HSV_S, HSV_V | zarr hsv 배열 |
-| 14–16 | Sobel_X, Sobel_Y, Sobel_Mag | zarr sobel 배열 |
-
----
-
 ## [2026-05-04] label_code 라벨 scheme 변경 — 6-class 수동 라벨 + binary remap
 
 ### 변경 이유
@@ -1074,3 +969,108 @@ cloud 오버레이 색상이 순백색 (1.0, 1.0, 1.0) 이라, alpha blending �
    - 하늘색(saturated)은 어두운/밝은 배경 모두에서 동일하게 하늘색으로 보임
 2. **fill pixel masking 추가**: 추론 직후 `pred[fmask == 255] = 255` 적용
    - fill 영역은 모델 예측 무시, no-data(진회색)로 표시
+
+---
+
+## [2026-05-13] 패치 경계 격자 아티팩트 제거 + TOA Reflectance 변환
+
+### 배경 및 목표
+- 모델 추론 시 256×256 패치 경계에서 격자(grid) 아티팩트 발생 확인
+- 원인: stride=256으로 non-overlapping 패치 추론 시, 각 패치 경계 픽셀이 인접 패치의 실제 픽셀을 참조하지 못하고 zero padding으로 대체되어 경계 불연속성 발생
+- 추가: DN값 대신 TOA Reflectance를 학습에 사용 (물리적 의미 + 씬 간 일관성 향상)
+
+### 수정 내용
+
+#### 1. `utils/split_scene.py`
+- **258×258 패치 추출**: 256×256 중심 + 1px 실제 인접 픽셀 (씬 경계는 zero-fill)
+  - `row_pad_start/end`, `col_pad_start/end`로 확장된 rasterio window 설정
+  - `off_r/off_c`: 씬 경계 여부에 따라 canvas 내 쓰기 시작 위치 결정
+  - `off = 1` when at scene edge (no border → canvas[0] stays 0), `off = 0` otherwise
+- **TOA Reflectance 변환** 추가:
+  - `_find_mtl_file(scene_dir)`: 씬 폴더 내 MTL JSON 탐색
+  - `_load_sun_sin(scene_dir)`: MTL에서 태양 고도각 읽어 sin 값 반환 (없으면 1.0)
+  - `_dn_to_toa_uint16(spectral, sun_sin)`: `clip((2e-5×DN − 0.1) / sin(θ), 0, 1) × 10000` → uint16 저장
+  - 씬 단위로 `sun_sin` 계산 후 패치 루프에서 재사용
+- Zarr 포맷 변경: spectral `(256,256,8) DN uint16` → `(258,258,8) TOA×10000 uint16`
+- label은 `(256,256)` 그대로 유지 (stride 불변)
+
+#### 2. `dataset/patch_dataset.py`
+- 기존 zero padding 제거: `np.pad(full_input, ...)` 삭제
+- label을 transforms **이전**에 258×258로 패딩 (NODATA=255)
+  - transforms가 full_input(258×258)와 label(256→258)을 동일 크기로 처리 가능
+- `/10000` 로딩 그대로 유지 → TOA reflectance [0,1] 자동 획득
+
+#### 3. `compare_scene.py`
+- `_dn_to_toa_uint16`, `_load_sun_sin` import 추가
+- 씬 밴드 로드 직후 TOA 변환 적용 (sun_sin 포함)
+- 패치 루프에서 zero padding → **실제 인접 픽셀 258×258 추출**:
+  ```python
+  ri0, ri1 = max(0, i-1), min(H, i+PATCH_SIZE+1)
+  ci0, ci1 = max(0, j-1), min(W, j+PATCH_SIZE+1)
+  patch_pad = np.zeros((PATCH_SIZE+2, PATCH_SIZE+2, ...), dtype=spectral.dtype)
+  patch_pad[off_r:..., off_c:...] = spectral[ri0:ri1, ci0:ci1]
+  ```
+
+#### 4. `label_code/scene_to_patches.py`
+- 258×258 real border 추출 로직 추가 (split_scene.py와 동일)
+- `_dn_to_toa_uint16`, `_load_sun_sin` import 및 적용
+- `from rasterio import windows as rwin` import 위치 함수 외부로 이동
+
+### 기타 작업
+- TRAIN 씬 폴더에 MTL JSON 이미 symlink로 존재 확인 (source가 Weddell Sea 원본)
+- 기존 TRAIN_ZARR / VALIDATION_ZARR 전체 삭제 후 nohup으로 재생성 시작:
+  ```bash
+  nohup conda run -n remote python make_landsat_data.py --mode train > logs/make_train_zarr.log 2>&1 &
+  ```
+- VALIDATION 패치는 `label_code/scene_to_patches.py`로 별도 생성 (수동 라벨 기반)
+
+### TOA Reflectance ×10000 uint16 저장 이유
+- float32 저장 시 파일 크기 2배 → uint16 유지로 기존 크기 동일
+- `(reflectance × 10000).uint16` 저장 후 `/10000` 로드 = reflectance [0,1]
+- patch_dataset.py의 `/ 10000.0` 코드 변경 없이 자동 호환
+
+---
+
+### 새 패치 생성 방법
+
+```bash
+# zarr 패치 생성 (기존 H5 패치와 별도로 TRAIN_ZARR/ 에 생성됨)
+pip install zarr numcodecs
+python make_landsat_data.py --mode train
+
+# 패치 내용 확인
+python inspect_zarr.py data/TRAIN_ZARR/LC08_..._PATCH0.zarr
+python inspect_zarr.py data/TRAIN_ZARR/ --sample 6 --save
+```
+
+### 학습 방법 (변경 없음)
+
+```bash
+python train.py -e my_exp -st 0 -ip swirndsi -gpu 0
+
+# 파생 피처 활용 예
+python train.py -e my_exp -st 0 -ip swirndsi_sobel -gpu 0
+python train.py -e my_exp -st 0 -ip all_derived -gpu 0
+```
+
+---
+
+### 채널 레이아웃 (패치 내부)
+
+| zarr 배열 | shape | dtype | 설명 |
+|---|---|---|---|
+| `spectral` | (256,256,8) | uint16 | B1–B7, B9 raw DN |
+| `rgb` | (256,256,3) | float32 | B4/B3/B2 퍼센타일 정규화 [0,1] |
+| `hsv` | (256,256,3) | float32 | H,S,V [0,1] |
+| `sobel` | (256,256,3) | float32 | Sobel_X, Sobel_Y, Magnitude |
+| `label` | (256,256) | uint8 | 0=no-cloud, 1=cloud, 255=nodata |
+| `pseudo_label` | (256,256) | uint8 | stage 1+에서 label_generation.py가 추가 |
+
+### 학습 텐서 채널 레이아웃 (17채널)
+
+| 채널 | 이름 | 소스 |
+|---|---|---|
+| 0–7 | B1–B7, B9 | spectral/10000 |
+| 8–10 | RGB_R, RGB_G, RGB_B | zarr rgb 배열 |
+| 11–13 | HSV_H, HSV_S, HSV_V | zarr hsv 배열 |
+| 14–16 | Sobel_X, Sobel_Y, Sobel_Mag | zarr sobel 배열 |

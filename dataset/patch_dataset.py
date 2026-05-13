@@ -207,7 +207,7 @@ class PatchDataset(Dataset):
         patch_path = self.file_list[idx]
         store = zarr.open_group(patch_path, mode='r')
 
-        # ── Spectral bands: normalise DN → TOA reflectance ─────────────
+        # ── Spectral bands: stored as TOA reflectance ×10000 → [0, 1] ──
         spectral = store['spectral'][:].astype(np.float32) / 10000.0  # (H, W, 8)
 
         # ── Precomputed derived features ────────────────────────────────

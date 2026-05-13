@@ -56,7 +56,7 @@ from utils.dir_paths import WEDDELL_SEA_SOURCE_PATH
 PATCH_SIZE    = 256
 STRIDE        = 256
 MAX_FILL_FRAC = 0.50
-MIN_VALID_FRAC = 0.05
+MIN_VALID_FRAC = 0.30
 VALID_LABEL_VALUES = {1, 2, 3, 4}   # scene_to_patches.py 와 동일
 
 COLORS = {          # (R, G, B) 0-1 범위
@@ -65,6 +65,38 @@ COLORS = {          # (R, G, B) 0-1 범위
     'ignore':   (0.15, 0.15, 0.15),   # 진회색
 }
 ALPHA = 0.55   # 오버레이 불투명도
+
+
+# ── Gini 지수 계산 ────────────────────────────────────────────────────
+
+def compute_gini(patch_path: str) -> float:
+    """
+    GT label의 3-class Gini impurity를 반환.
+    클래스: 0(no-cloud), 1(cloud), 255(ignore)
+    gini = 1 - Σp_i²,  범위 [0, 2/3]  (2/3 ≈ 0.667 = 완전한 1/3:1/3:1/3 혼합)
+    값이 높을수록 세 레이블이 고르게 섞인 패치.
+    """
+    store = zarr.open_group(patch_path, mode='r')
+    label = store['label'][:]
+    n = label.size
+    if n == 0:
+        return 0.0
+    gini = 1.0
+    for v in (0, 1, 255):
+        p = float((label == v).sum()) / n
+        gini -= p * p
+    return gini
+
+
+def sample_by_gini(patch_dirs: list[str], n: int,
+                   min_gini: float) -> list[str]:
+    """
+    min_gini 이상인 패치를 필터링한 뒤 최대 n개 랜덤 샘플링.
+    필터 통과 패치가 n보다 적으면 전부 반환.
+    """
+    qualified = [p for p in patch_dirs if compute_gini(p) >= min_gini]
+    print(f"  Gini ≥ {min_gini:.2f}: {len(qualified)}/{len(patch_dirs)} 패치 통과")
+    return random.sample(qualified, min(n, len(qualified)))
 
 
 # ── 패치 이름 파싱 ─────────────────────────────────────────────────────
@@ -189,28 +221,34 @@ def run_inference(patch_path: str, exp_name: str, gpu_id: list) -> np.ndarray:
 def make_scene_overview(scene_dir: Path, row: int, col: int,
                          patch_size: int = PATCH_SIZE) -> np.ndarray | None:
     """
-    씬의 B4 밴드를 썸네일로 축소하고 패치 위치를 빨간 박스로 표시.
+    씬의 FCI (B5-NIR / B4-Red / B3-Green) 썸네일에 패치 위치를 빨간 박스로 표시.
     반환: (H', W', 3) float32 ∈ [0,1]  또는  None (밴드 파일 없을 시)
     """
-    bf = find_band_file(str(scene_dir), 'B4')
-    if bf is None:
+    # FCI 밴드: R=B5(NIR), G=B4(Red), B=B3(Green)
+    fci_bands = ['B5', 'B4', 'B3']
+    band_files = {bk: find_band_file(str(scene_dir), bk) for bk in fci_bands}
+    if any(v is None for v in band_files.values()):
         return None
 
-    with rasterio.open(bf) as src:
+    with rasterio.open(band_files['B5']) as src:
         H, W = src.height, src.width
-        max_px = 800
-        scale = max(1, max(H, W) // max_px)
-        out_h, out_w = H // scale, W // scale
-        data = src.read(1, out_shape=(out_h, out_w)).astype(np.float32)
+    max_px = 800
+    scale  = max(1, max(H, W) // max_px)
+    out_h, out_w = H // scale, W // scale
 
-    valid = data[data > 0]
-    if valid.size:
-        p2, p98 = np.percentile(valid, [2, 98])
-        data = np.clip((data - p2) / (p98 - p2 + 1e-8), 0, 1)
-    else:
-        data = np.zeros_like(data)
+    channels = []
+    for bk in fci_bands:
+        with rasterio.open(band_files[bk]) as src:
+            ch = src.read(1, out_shape=(out_h, out_w)).astype(np.float32)
+        valid = ch[ch > 0]
+        if valid.size:
+            p2, p98 = np.percentile(valid, [2, 98])
+            ch = np.clip((ch - p2) / (p98 - p2 + 1e-8), 0, 1)
+        else:
+            ch = np.zeros_like(ch)
+        channels.append(ch)
 
-    thumb = np.stack([data, data, data], axis=-1)
+    thumb = np.stack(channels, axis=-1)  # (H', W', 3) FCI
 
     # 패치 좌표를 썸네일 스케일로 변환
     r0 = min(row // scale,        out_h - 1)
@@ -276,6 +314,11 @@ def visualize_patch(patch_path: str, exp_name: str, label_dir: str,
     rgb   = store['rgb'][:]                    # (H, W, 3) float32 ∈ [0,1]
     gt    = store['label'][:]                  # (H, W) uint8
 
+    # swath 밖 fill 픽셀은 모델이 0(no-cloud)으로 예측하는 경향이 있으므로
+    # QA_PIXEL fill 마스크만 사용해 prediction에도 255(ignore)로 덮어씌움
+    # (gt==255는 미라벨 영역도 포함하므로 사용하지 않음)
+    pred[fmask == 255] = 255
+
     # ── 플롯 (2×3 그리드) ──
     fig, axes = plt.subplots(2, 3, figsize=(18, 12), dpi=120)
 
@@ -305,7 +348,7 @@ def visualize_patch(patch_path: str, exp_name: str, label_dir: str,
     if overview is not None:
         axes[1, 1].imshow(overview)
         axes[1, 1].set_title(
-            f'Scene Overview  (row={row}, col={col})', fontsize=11)
+            f'Scene FCI Overview  (row={row}, col={col})', fontsize=11)
     axes[1, 1].axis('off')
 
     fig.suptitle(f"{scene_id}  PATCH{patch_idx}  (row={row}, col={col})",
@@ -337,6 +380,12 @@ def get_args():
                    help='출력 디렉토리 (기본: vis_output/)')
     p.add_argument('--sample',    type=int, default=None,
                    help='디렉토리 지정 시 랜덤 샘플 수')
+    p.add_argument('--min_gini', type=float, default=0.0,
+                   help='최소 Gini impurity 기준 (기본 0.0=필터 없음). '
+                        '3-class Gini: {0,1,255} 기준, 최대 0.667. '
+                        '권장: 0.1~0.3')
+    p.add_argument('--list_only', action='store_true', default=False,
+                   help='패치 경로만 출력하고 추론은 실행하지 않음 (bash 파이프용)')
     return p.parse_args()
 
 
@@ -347,9 +396,20 @@ if __name__ == '__main__':
     if args.patch.endswith('.zarr'):
         targets = [args.patch]
     else:
-        targets = sorted(glob.glob(os.path.join(args.patch, '*.zarr')))
-        if args.sample:
-            targets = random.sample(targets, min(args.sample, len(targets)))
+        all_patches = sorted(glob.glob(os.path.join(args.patch, '*.zarr')))
+        if args.sample and args.min_gini > 0.0:
+            targets = sample_by_gini(all_patches, args.sample, args.min_gini)
+        elif args.sample:
+            targets = random.sample(all_patches, min(args.sample, len(all_patches)))
+        elif args.min_gini > 0.0:
+            targets = [p for p in all_patches if compute_gini(p) >= args.min_gini]
+        else:
+            targets = all_patches
+
+    if args.list_only:
+        for t in targets:
+            print(t)
+        sys.exit(0)
 
     label_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), args.label_dir)
 

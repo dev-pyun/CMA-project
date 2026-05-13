@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "/home/pyuncb/src/make_landsat_data.py", line 59, in <module>
+    make_patches(
+    ~~~~~~~~~~~~^
+        scene_parent_dir=os.path.abspath(args.path),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        overlap=args.overlap,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/pyuncb/src/utils/split_scene.py", line 353, in make_patches
+    raise FileNotFoundError(
+        f'No Landsat 8 scenes found in {scene_parent_dir}. '
+        f'Expected directories containing *_B1.TIF files.')
+FileNotFoundError: No Landsat 8 scenes found in /home/pyuncb/src/data/VALIDATION. Expected directories containing *_B1.TIF files.
+
+ERROR conda.cli.main_run:execute(127): `conda run python make_landsat_data.py --mode test` failed. (See above for error)
