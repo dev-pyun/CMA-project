@@ -1074,3 +1074,208 @@ python train.py -e my_exp -st 0 -ip all_derived -gpu 0
 | 8–10 | RGB_R, RGB_G, RGB_B | zarr rgb 배열 |
 | 11–13 | HSV_H, HSV_S, HSV_V | zarr hsv 배열 |
 | 14–16 | Sobel_X, Sobel_Y, Sobel_Mag | zarr sobel 배열 |
+
+
+---
+
+## 2026-05-14 | network_input.py — cirrus_ndsindwi 모드 추가
+
+### 변경 내용
+- `inp_cirrus_ndsindwi()` 함수 추가: B2–B7 + B9(Cirrus) + NDSI + NDWI (9채널)
+- `_PRESET_MODES`에 `'cirrus_ndsindwi': (inp_cirrus_ndsindwi, 9)` 등록
+
+### 배경
+water 오분류 문제 분석:
+- NDSI는 water와 cloud shadow on ice를 구분 못함 (둘 다 B6이 낮아서 NDSI 높음)
+- NDWI = (B3-B5)/(B3+B5): water는 NIR 흡수로 NDWI 높음, shadow on ice는 ice NIR 반사 때문에 NDWI 낮음
+- Cirrus(B9)는 얇은 고층운 탐지에 유용
+
+### 학습 명령
+```bash
+conda run -n remote python train.py \
+    -e cirrus_ndsindwi_trial1_stage0 -st 0 -ip cirrus_ndsindwi -gpu 0
+```
+
+---
+
+## 2026-05-14 | label_generation.py, predict.py — 기본 batch_size 1 → 32 변경
+
+### 변경 내용
+- `label_generation.py`: `-bs` 기본값 `1` → `32`
+- `predict.py`: `-bs` 기본값 `1` → `32`
+
+### 배경
+두 스크립트 모두 inference-only (`torch.no_grad()`)로 gradient 불필요, L40S 46GB GPU에서 batch_size=1은 GPU 활용률이 매우 낮음. `train.py`와 동일한 32로 통일.
+
+---
+
+## 2026-05-15 | compare_scene.py, model.py — --inp_mode 자동 감지
+
+### 변경 내용
+- `compare_scene.py`: `_detect_inp_mode(exp_name)` 함수 추가
+  - 체크포인트(`model_best.pth`)에서 `inp_mode` 자동 로드
+  - 구버전 함수명 형식(`inp_swirndsi_ndwi`) → 모드 키(`swirndsindwi`) 역매핑 처리
+  - `--inp_mode` 인자 기본값 `'swirndsi'` → `None` (생략 시 자동 감지)
+- `model.py`: 체크포인트 저장 시 `inp_mode` 값을 함수명 대신 모드 키로 저장
+  - `self.inp_func.__name__` → `self.exp.inp_mode`
+
+### 배경
+`--exp swirndsindwi_trial1_stage2`로 실행 시 `--inp_mode`를 명시하지 않으면 기본값 `swirndsi`(7채널)로 모델이 생성되어 체크포인트(8채널)와 채널 수 불일치 에러 발생.
+
+---
+
+## 2026-05-15 | vis_pipeline.sh 신규 생성
+
+### 변경 내용
+- `vis_pipeline.sh` 생성: 씬 하나에 대해 Fmask + stage 1/2/3 예측 이미지를 한 번에 생성하는 bash 파이프라인
+  - `--scene_dir`, `--exp_base` 필수 / `--stages`, `--label_path`, `--gpu`, `--out` 선택
+  - `exp_data/{exp_base}_stage{N}` 디렉토리 및 `model_best.pth` 존재 여부 확인 후 스킵
+  - `--inp_mode` 자동 감지 (compare_scene.py의 `_detect_inp_mode` 활용)
+
+---
+
+## 2026-05-15 | Binary → 3-class (cloud / cloud shadow / no-cloud) 전환
+
+### 배경
+S1 안 채택: cloud shadow를 no-cloud로 합치던 binary 분류에서 shadow를 독립 클래스로 분리.
+
+### 클래스 체계
+| 라벨 값 | 클래스 | 색상 |
+|---|---|---|
+| 0 | No-Cloud | 초록 |
+| 1 | Cloud | 하늘색 |
+| 2 | Cloud Shadow | 연보라색 (0.72, 0.53, 0.90) |
+| 255 | No-Data (ignore) | — |
+
+### 변경 파일 목록
+| 파일 | 변경 내용 |
+|---|---|
+| `utils/qa_pixel_mapping.py` | `NUM_BINARY_CLASSES` 2→3, `BINARY_SHADOW=2` 상수 추가, `qa_pixel_to_binary()` shadow를 클래스 2로 분리 |
+| `network/model.py` | `NUM_CLASSES` 2→3, confidence threshold 0.65→0.66, CSV 헤더에 `SHADOW_F` 추가 |
+| `utils/MFB.py` | `NUM_CLASSES` 2→3 |
+| `label_code/scene_to_patches.py` | `LABEL_REMAP` shadow(3)→2로 변경, docstring/출력 메시지 업데이트 |
+| `compare_scene.py` | `COLORS`에 shadow 연보라색 추가, `_LABEL_REMAP` 업데이트, 범례 추가 |
+| `predict.py` | `CLASS_NAMES` → `BINARY_CLASS_NAMES` 교체, 루프 6→`NUM_BINARY_CLASSES` |
+| `inspect_zarr.py` | 클래스 이름/색상/막대그래프에 shadow 추가 |
+| `diagnose_label_offset.py` | `LABEL_REMAP` 업데이트, 분포 출력에 클래스 2 추가 |
+
+### 주의사항
+- 기존 학습된 모델(binary)은 호환 불가 — 3-class로 처음부터 재학습 필요
+- val 패치(VALIDATION_ZARR)는 `scene_to_patches.py`로 재생성 필요 (LABEL_REMAP 변경)
+
+---
+
+## 2026-05-15 | update_train_labels.py, test_pipeline.py 신규 생성
+
+### update_train_labels.py
+- TRAIN_ZARR 패치의 `label` 배열을 binary({0,1,255}) → 3-class({0,1,2,255})로 in-place 업데이트
+- spectral/rgb/hsv/sobel은 재생성하지 않고 QA_PIXEL TIF만 재읽어 label만 덮어씀
+- `split_scene.py`와 동일한 루프 순서(iy → ix, skip 조건 동일)로 PATCH 번호를 재현
+- `--dry_run` 옵션으로 실제 쓰기 없이 패치 수 및 클래스 분포 사전 확인 가능
+
+```bash
+# 사전 확인
+conda run -n remote python update_train_labels.py --dry_run
+
+# 실제 업데이트
+conda run -n remote python update_train_labels.py
+```
+
+### test_pipeline.py
+- 3-class 전환 후 파이프라인 전체 동작 확인 스크립트 (16개 항목)
+- qa_pixel_to_binary 클래스 값, DataLoader 라벨 범위, 모델 forward/backward, MFB, confusion matrix, 실제 train/val 루프 검증
+- 실행: `conda run -n remote python test_pipeline.py -gpu 0 -ip swirndsindwi`
+- 결과: 16/16 PASS 확인
+
+### VALIDATION_ZARR 재생성 필요
+label_code/scene_to_patches.py의 LABEL_REMAP이 변경됐으므로 val 패치 재생성 필요:
+```bash
+cd /home/pyuncb/src
+conda run -n remote python label_code/scene_to_patches.py \
+    --scene_dir <scene_dir> --label_path <label_path> --split val --overwrite
+```
+
+---
+
+## 2026-05-15 | compare_scene.py — stage/inp_mode 파라미터 추가 + off_r/off_c 버그 수정
+
+### 변경 내용
+
+**`run_scene_inference()` / `compare_scene()` 파라미터 추가**
+- `stage`, `inp_mode` 가 하드코딩(`stage=3`, `inp_mode='swirndsi'`)되어 있어 다른 stage/모드 사용 불가
+- 두 함수 모두 `stage`, `inp_mode` 인자 추가
+- CLI에 `--stage`, `--inp_mode` 인자 추가
+
+**`off_r` / `off_c` 계산 버그 수정**
+- 기존: `off_r = i - ri0` → i>0이면 항상 1, i=0이면 0 (의미 반대)
+- 올바른 의미: border pixel을 **못 가져온** 쪽(씬 가장자리)에서만 1
+- 수정: `off_r = 1 if ri0 == i else 0` / `off_c = 1 if ci0 == j else 0`
+- 버그 영향: non-edge 패치에서 source 258px → target 257px 슬롯으로 할당 시도 → `ValueError: could not broadcast` 발생
+
+### 실행 예
+```bash
+conda run -n remote python compare_scene.py \
+    --scene_dir .../LC08_L1GT_188115_20201114_20210315_02_T2 \
+    --exp swirndsindwi_trial1_stage1 \
+    --stage 1 --inp_mode swirndsindwi --gpu 0
+```
+
+---
+
+## 2026-05-15 | vis_cv_features.py — 씬별 7×6 CV 피처 그리드 신규 생성
+
+### 배경
+어떤 입력 채널 조합이 cloud 탐지에 유용한지 시각적으로 파악하기 위해,
+여러 씬에서 42가지 CV 피처를 한눈에 비교할 수 있는 시각화 스크립트 작성.
+
+### 신규 파일: `vis_cv_features.py`
+
+루트 폴더에서 N개 씬을 랜덤 샘플링해 씬별로 7×6 그리드 PNG 저장.
+
+**7×6 구성:**
+
+| Row | 카테고리 | 피처 |
+|-----|---------|------|
+| 1 | Raw Spectral | RGB / B1 / B5 NIR / B6 SWIR1 / B7 SWIR2 / B9 Cirrus |
+| 2 | Spectral Index + Color | NDSI / NDWI / NDVI / MNDWI / Gray-world RGB / Brightness |
+| 3 | Color Space + Entropy | H / S / V / Entropy(H) / Entropy(S) / Entropy(V) |
+| 4 | Edge / Gradient | Sobel Mag / Sobel X / Sobel Y / Laplacian / DoG / Canny |
+| 5 | Texture | Local Entropy / Local StdDev / LBP / White Top-hat / Local CoV / Local Range |
+| 6 | Spectral Transform | HOT / Vis Brightness / SWIR Ratio(B6/B7) / PCA1 / PCA2 / PCA3 |
+| 7 | Lab / FFT | Lab a (G–R) / Lab b (B–Y) / FFT Mag (GFD) / FFT Low-freq / FFT High-freq / GFD Edge FFT |
+
+**Row 7 피처 설명 (GFD/Lab/Gray-world/FFT 방식):**
+- **Gray-world RGB** (Row 2 슬롯): 각 채널 평균을 0.5로 정규화하는 Gray-world 색 보정. 조명 변화에 강인한 색상 표현
+- **Lab a**: CIE Lab 색공간의 a채널 (녹색↔적색 축), 식생·토양 구분
+- **Lab b**: CIE Lab 색공간의 b채널 (청색↔황색 축), 대기산란·수면 구분
+- **FFT Mag (GFD)**: 루미넌스의 2D FFT 로그 크기 스펙트럼. GFD (General Fourier Descriptor)의 주파수 도메인 표현
+- **FFT Low-freq**: 저주파 성분만 역변환 → 코스 구조(구름 덩어리, 대규모 지형)
+- **FFT High-freq**: 고주파 성분만 역변환 → 미세 텍스처 및 경계
+- **GFD Edge FFT**: Canny 엣지맵의 2D FFT 로그 크기 → 엣지 패턴의 주파수 분포 (shape analysis)
+
+**의존성 설치** (remote 환경):
+```bash
+conda run -n remote pip install scikit-image scikit-learn
+```
+
+**실행:**
+```bash
+conda run -n remote python vis_cv_features.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --n 5 --out cv_vis/ --seed 42
+```
+
+결과: `cv_vis/{scene_id}.png` (씬당 1개, 다운샘플 후 max 1000px 기준 계산)
+
+---
+
+## 2026-05-15 | vis_cv_features.py — BSI 제거, GFD/Lab/FFT 피처 추가 (6×6 → 7×6)
+
+### 변경 내용
+- **BSI 제거**: Row 2의 BSI (Bare Soil Index) 패널 삭제
+- **Gray-world RGB 추가** (Row 2 슬롯): Gray-world 색 보정 RGB 이미지
+- **Row 7 신규 추가** (Lab / FFT): Lab a / Lab b / FFT Mag / FFT Low-freq / FFT High-freq / GFD Edge FFT
+- 그리드 6×6 → **7×6 (42 패널)**로 확장
+- `ROW_LABELS` 업데이트: `'Spectral Index'` → `'Spectral Index + Color'`, `'Lab / FFT'` 추가
+- `plot_grid()`: `ROWS = 7`로 수정
+- 모듈 docstring 업데이트
