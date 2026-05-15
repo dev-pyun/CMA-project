@@ -8,7 +8,8 @@
 # Input modes  (H5 patches always contain B1–B7 + B9, 8 spectral channels):
 #   Preset:
 #     swirndsi      - B2–B7 + NDSI               (7 ch) [default]
-#     cirrus_ndsi   - B2–B7 + B9 + NDSI           (8 ch)
+#     cirrus_ndsi     - B2–B7 + B9 + NDSI           (8 ch)
+#     cirrus_ndsindwi - B2–B7 + B9 + NDSI + NDWI  (9 ch)
 #     all_cirrus    - B1–B7 + B9                  (8 ch)
 #     allndsi       - B1–B7 + NDSI                (8 ch)
 #     swirndsindwi  - B2–B7 + NDSI + NDWI         (8 ch)

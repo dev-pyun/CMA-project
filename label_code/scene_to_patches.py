@@ -17,7 +17,8 @@ patch_dataset.py 가 training/validation/test 패치를 구분 없이 로딩 가
 
 label remap:
     {1(water), 2(snow)}      → 0  (no-cloud)
-    {3(shadow), 4(cloud)}    → 1  (cloud)
+    {4(cloud)}               → 1  (cloud)
+    {3(shadow)}              → 2  (cloud shadow)
     {0(미라벨), 255(fill)}   → 255 (ignore)
 
 필터링:
@@ -58,11 +59,12 @@ from utils.split_scene import (
 from utils.dir_paths import VALID_ZARR_PATH, TEST_ZARR_PATH
 
 
-# label_scene.py 출력 → 학습 binary 형식
-# {shadow(3), cloud(4)} → 1(cloud)
-# {water(1), snow(2)}   → 0(no-cloud)
-# {nodata(0), fill(255)} → 255(ignore)
-LABEL_REMAP = {0: 255, 1: 0, 2: 0, 3: 1, 4: 1, 255: 255}
+# label_scene.py 출력 → 학습 3-class 형식
+# {water(1), snow(2)}    → 0  (no-cloud)
+# {cloud(4)}             → 1  (cloud)
+# {shadow(3)}            → 2  (cloud shadow)
+# {nodata(0), fill(255)} → 255 (ignore)
+LABEL_REMAP = {0: 255, 1: 0, 2: 0, 3: 2, 4: 1, 255: 255}
 VALID_LABEL_VALUES = {1, 2, 3, 4}
 
 DEFAULT_OUT = {
@@ -208,7 +210,7 @@ def process_scene(
     print(f"  ✓ {scene_id}: {n_actually_saved} 저장, "
           f"{n_skipped_existing} 스킵(기존 파일), "
           f"{n_skipped_fill} 스킵(fill), {n_skipped_label} 스킵(라벨 부족)")
-    print(f"    remap: {{1,2}}→0(no-cloud)  {{3,4}}→1(cloud)  {{0,255}}→255(ignore)")
+    print(f"    remap: {{1,2}}→0(no-cloud)  {{4}}→1(cloud)  {{3}}→2(shadow)  {{0,255}}→255(ignore)")
     print(f"    출력: {out_root}")
     return n_saved
 

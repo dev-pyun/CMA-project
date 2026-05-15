@@ -33,7 +33,7 @@ def get_args(argv=None):
     parser = argparse.ArgumentParser(description='Pseudo-Label Generation')
     parser.add_argument('-e', '--exp_name', required=True,
                         help='Name of the trained experiment')
-    parser.add_argument('-bs', '--batch_size', type=int, default=1,
+    parser.add_argument('-bs', '--batch_size', type=int, default=32,
                         help='Batch size')
     parser.add_argument('-st', '--stage', type=int, default=1,
                         help='Target stage for label generation')

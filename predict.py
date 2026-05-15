@@ -21,7 +21,7 @@ from dataset.patch_dataset import setup_data
 from network.model import Model
 from utils.experiment import Experiment
 from utils.metrics import Metrics, calculate_confusion_matrix
-from utils.qa_pixel_mapping import CLASS_NAMES
+from utils.qa_pixel_mapping import BINARY_CLASS_NAMES as CLASS_NAMES, NUM_BINARY_CLASSES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +36,7 @@ def get_args(argv=None):
                         help='Experiment name (e.g. exp1_stage3)')
     parser.add_argument('-p', '--path', required=True,
                         help='Path to folder with H5 test patches')
-    parser.add_argument('-bs', '--batch_size', type=int, default=1,
+    parser.add_argument('-bs', '--batch_size', type=int, default=32,
                         help='Batch size')
     parser.add_argument('-ip', '--inp_mode', default='swirndsi',
                         help='Input mode (must match training)')
@@ -93,7 +93,7 @@ if __name__ == '__main__':
     # Per-class IoU
     print('\nPer-class IoU:')
     ious = []
-    for c in range(6):
+    for c in range(NUM_BINARY_CLASSES):
         tp = cm[c, c]
         fp = cm[:, c].sum() - tp
         fn = cm[c, :].sum() - tp
@@ -109,8 +109,8 @@ if __name__ == '__main__':
 
     # Confusion matrix
     print('\nConfusion Matrix:')
-    header = '            ' + ''.join(f'{CLASS_NAMES[c]:>10s}' for c in range(6))
+    header = '            ' + ''.join(f'{CLASS_NAMES[c]:>14s}' for c in range(NUM_BINARY_CLASSES))
     print(header)
-    for c in range(6):
-        row = f'{CLASS_NAMES[c]:12s}' + ''.join(f'{cm[c, j]:10d}' for j in range(6))
+    for c in range(NUM_BINARY_CLASSES):
+        row = f'{CLASS_NAMES[c]:12s}' + ''.join(f'{cm[c, j]:14d}' for j in range(NUM_BINARY_CLASSES))
         print(row)

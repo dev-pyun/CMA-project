@@ -27,7 +27,7 @@ from utils.split_scene import find_band_file, find_qa_pixel_file
 PATCH_SIZE = 256
 STRIDE     = 256
 
-LABEL_REMAP = {0: 255, 1: 0, 2: 0, 3: 1, 4: 1, 255: 255}
+LABEL_REMAP = {0: 255, 1: 0, 2: 0, 3: 2, 4: 1, 255: 255}
 
 def remap(arr):
     out = np.full_like(arr, 255, dtype=np.uint8)
@@ -98,7 +98,7 @@ def main():
     store     = zarr.open_group(patch_path, mode='r')
     zarr_lbl  = store['label'][:].astype(np.uint8)
     print(f"\n[3] zarr label 분포: "
-          + ", ".join(f"{v}:{(zarr_lbl==v).sum()}" for v in [0, 1, 255]))
+          + ", ".join(f"{v}:{(zarr_lbl==v).sum()}" for v in [0, 1, 2, 255]))
 
     # ── 4. label TIF에서 여러 위치 후보 비교 ──────────────────────────
     candidates = {

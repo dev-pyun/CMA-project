@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 FILTER_OPTIONS = [16, 32, 24, 32]
 DEPTH_OPTIONS = [5, 5, 6, 6]
 
-NUM_CLASSES = 2   # binary: 0=no-cloud, 1=cloud  (255=nodata, ignored in loss)
+NUM_CLASSES = 3   # 3-class: 0=no-cloud, 1=cloud, 2=shadow  (255=nodata, ignored in loss)
 NODATA_LABEL = 255
 
 
@@ -165,7 +165,7 @@ class Model:
     # Encoding / pseudo-labels
     # ------------------------------------------------------------------
     @staticmethod
-    def encode_label(out, label_gen=False, threshold=0.65):
+    def encode_label(out, label_gen=False, threshold=0.66):
         """
         Convert network output to class predictions.
         For label generation, only keep predictions with confidence ≥ threshold.
@@ -221,7 +221,7 @@ class Model:
             'model_state_dict': self.network.state_dict(),
             'stage': self.exp.stage,
             'full': self.exp.full,
-            'inp_mode': self.inp_func.__name__,
+            'inp_mode': self.exp.inp_mode,
         }, save_path)
 
     def save_best_model(self):
@@ -279,6 +279,6 @@ class Model:
             TRAIN_PATH,
             f"label_stats_stage{self.exp.config['stage'] + 1}.csv")
         with open(label_stats_file, 'w') as f:
-            f.write('FILENAME,NOCLOUD_F,CLOUD_F\n')
+            f.write('FILENAME,NOCLOUD_F,CLOUD_F,SHADOW_F\n')
             for i in self.stage_freq_data:
                 f.write(f'{i}\n')

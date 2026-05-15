@@ -1,8 +1,8 @@
 """
 QA_PIXEL bit-mask mapping for Landsat 8 Collection 2 Level-1.
 
-Converts the QA_PIXEL band into either a 6-class label map or a binary
-cloud / no-cloud map.
+Converts the QA_PIXEL band into either a 6-class label map or a 3-class
+cloud / cloud shadow / no-cloud map.
 
 6-class scheme (class constants below):
     0 – No-Data (Fill)
@@ -12,10 +12,11 @@ cloud / no-cloud map.
     4 – Snow / Ice
     5 – Water
 
-Binary scheme:
-    0   – No-Cloud  (clear, snow, water)
-    1   – Cloud     (cloud, shadow, cirrus, dilated cloud)
-    255 – No-Data   (fill)
+3-class scheme:
+    0   – No-Cloud        (clear, snow, water)
+    1   – Cloud           (cloud, cirrus, dilated cloud)
+    2   – Cloud Shadow
+    255 – No-Data         (fill)
 
 Bit layout of QA_PIXEL (Landsat 8 Collection 2):
     Bit  0 : Fill
@@ -54,18 +55,20 @@ CLASS_NAMES = {
 
 NUM_CLASSES = 6
 
-# ── Binary constants ───────────────────────────────────────────────────
+# ── 3-class constants ──────────────────────────────────────────────────
 BINARY_NOCLOUD = 0
 BINARY_CLOUD   = 1
+BINARY_SHADOW  = 2
 BINARY_NODATA  = 255
 
 BINARY_CLASS_NAMES = {
     BINARY_NOCLOUD: 'No-Cloud',
     BINARY_CLOUD:   'Cloud',
+    BINARY_SHADOW:  'Cloud Shadow',
     BINARY_NODATA:  'No-Data',
 }
 
-NUM_BINARY_CLASSES = 2
+NUM_BINARY_CLASSES = 3
 
 
 def qa_pixel_to_classes(qa_pixel: np.ndarray) -> np.ndarray:
@@ -109,11 +112,12 @@ def qa_pixel_to_classes(qa_pixel: np.ndarray) -> np.ndarray:
 
 def qa_pixel_to_binary(qa_pixel: np.ndarray) -> np.ndarray:
     """
-    Convert Landsat 8 Collection 2 QA_PIXEL bitmask to a binary cloud label.
+    Convert Landsat 8 Collection 2 QA_PIXEL bitmask to a 3-class label.
 
-    Cloud = Cloud (Bit 3) | Shadow (Bit 4) | Cirrus (Bit 2) | Dilated (Bit 1)
-    No-Cloud = Clear (Bit 6) | Snow (Bit 5) | Water (Bit 7)
-    No-Data  = Fill (Bit 0)  → label 255 (ignored during training)
+    No-Cloud     = Clear (Bit 6) | Snow (Bit 5) | Water (Bit 7)
+    Cloud        = Cloud (Bit 3) | Cirrus (Bit 2) | Dilated Cloud (Bit 1)
+    Cloud Shadow = Cloud Shadow (Bit 4)   [overridden by Cloud if both set]
+    No-Data      = Fill (Bit 0)  → label 255 (ignored during training)
 
     Parameters
     ----------
@@ -123,16 +127,19 @@ def qa_pixel_to_binary(qa_pixel: np.ndarray) -> np.ndarray:
     Returns
     -------
     labels : np.ndarray
-        2-D array of binary labels (uint8):
-        0 = no-cloud, 1 = cloud, 255 = no-data.
+        2-D array of 3-class labels (uint8):
+        0 = no-cloud, 1 = cloud, 2 = cloud shadow, 255 = no-data.
     """
     labels = np.full(qa_pixel.shape, BINARY_NOCLOUD, dtype=np.uint8)
 
+    # Cloud Shadow (applied first, lower priority)
+    labels[_bit_set(qa_pixel, 4)] = BINARY_SHADOW
+
+    # Cloud overrides shadow when both bits are set
     cloud_mask = (
         _bit_set(qa_pixel, 1) |  # Dilated Cloud
         _bit_set(qa_pixel, 2) |  # Cirrus
-        _bit_set(qa_pixel, 3) |  # Cloud
-        _bit_set(qa_pixel, 4)    # Cloud Shadow
+        _bit_set(qa_pixel, 3)    # Cloud
     )
     labels[cloud_mask] = BINARY_CLOUD
 

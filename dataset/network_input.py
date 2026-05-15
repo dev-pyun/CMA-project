@@ -176,6 +176,14 @@ def inp_cirrus_ndsi(inp_img):
     return torch.cat([bands, ndsi], dim=1)
 
 
+def inp_cirrus_ndsindwi(inp_img):
+    """Cirrus + SWIR + NDSI + NDWI: B2–B7, B9 + NDSI + NDWI (9 channels)."""
+    bands = inp_img[:, (1, 2, 3, 4, 5, 6, 7), :, :]
+    ndsi  = compute_NDSI(inp_img)
+    ndwi  = compute_NDWI(inp_img)
+    return torch.cat([bands, ndsi, ndwi], dim=1)
+
+
 # ── New presets using precomputed derived features ─────────────────────
 
 def inp_rgb_precomp(inp_img):
@@ -232,6 +240,7 @@ _PRESET_MODES = {
     'swirndwi':         (inp_swirndwi,         7),
     'allndsi':          (inp_allndsi,          8),
     'cirrus_ndsi':      (inp_cirrus_ndsi,      8),
+    'cirrus_ndsindwi':  (inp_cirrus_ndsindwi,  9),
     # Derived features
     'rgb_precomp':      (inp_rgb_precomp,      3),
     'hsv':              (inp_hsv,              3),

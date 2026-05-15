@@ -90,9 +90,10 @@ STRIDE     = 256
 NODATA_VAL = 255
 
 COLORS = {
-    0:   (0.13, 0.55, 0.13),   # 초록  — no-cloud
-    1:   (0.53, 0.81, 0.98),   # 하늘색 — cloud (배경 무관하게 하늘색으로 보임)
-    255: (0.10, 0.10, 0.10),   # 진회색 — ignore/no-data
+    0:   (0.13, 0.55, 0.13),   # 초록    — no-cloud
+    1:   (0.53, 0.81, 0.98),   # 하늘색  — cloud
+    2:   (0.72, 0.53, 0.90),   # 연보라색 — cloud shadow
+    255: (0.10, 0.10, 0.10),   # 진회색  — ignore/no-data
 }
 ALPHA = 0.8
 
@@ -134,15 +135,17 @@ def load_scene_rgb(spectral: np.ndarray) -> np.ndarray:
 # ── 모델 추론 (씬 전체 패치 스캔) ─────────────────────────────────────
 
 def run_scene_inference(spectral: np.ndarray, exp_name: str,
-                        gpu_id: list) -> np.ndarray:
+                        gpu_id: list,
+                        stage: int = 3,
+                        inp_mode: str = 'swirndsi') -> np.ndarray:
     """
     씬 전체를 256×256 패치로 분할해 모델 추론 후 전체 예측 맵 반환.
     반환: (H, W) uint8  — 0=no-cloud, 1=cloud, 255=처리 안 된 영역
     """
     import argparse as _ap
     args = _ap.Namespace(
-        exp_name=exp_name, stage=3, full=False, dropout=True,
-        learning_rate=1e-6, inp_mode='swirndsi', bands=None, indices=None,
+        exp_name=exp_name, stage=stage, full=False, dropout=True,
+        learning_rate=1e-6, inp_mode=inp_mode, bands=None, indices=None,
     )
     exp   = Experiment(args, mode='test')
     model = Model(exp, gpu_id=gpu_id)
@@ -171,8 +174,8 @@ def run_scene_inference(spectral: np.ndarray, exp_name: str,
                 # 학습 시와 동일하게 258×258 추출 (1px 실제 인접 픽셀)
                 ri0 = max(0, i - 1);  ri1 = min(H, i + PATCH_SIZE + 1)
                 ci0 = max(0, j - 1);  ci1 = min(W, j + PATCH_SIZE + 1)
-                off_r = i - ri0       # 0 at top edge, else 1
-                off_c = j - ci0       # 0 at left edge, else 1
+                off_r = 1 if ri0 == i else 0  # 1 when top border unavailable
+                off_c = 1 if ci0 == j else 0  # 1 when left border unavailable
 
                 patch_pad = np.zeros(
                     (PATCH_SIZE + 2, PATCH_SIZE + 2, spectral.shape[2]),
@@ -215,7 +218,7 @@ def overlay_mask(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 # ── GT 라벨 remap (scene_to_patches.py 와 동일) ───────────────────────
 
-_LABEL_REMAP = {0: 255, 1: 0, 2: 0, 3: 1, 4: 1, 255: 255}
+_LABEL_REMAP = {0: 255, 1: 0, 2: 0, 3: 2, 4: 1, 255: 255}
 
 def remap_gt(labels_raw: np.ndarray) -> np.ndarray:
     out = np.full_like(labels_raw, 255, dtype=np.uint8)
@@ -232,6 +235,7 @@ def _save_panel(rgb_v: np.ndarray, mask: np.ndarray,
     fig, ax = plt.subplots(1, 1, figsize=(10, 10), dpi=120)
     legend_patches = [
         mpatches.Patch(color=COLORS[1],   label='Cloud'),
+        mpatches.Patch(color=COLORS[2],   label='Cloud Shadow'),
         mpatches.Patch(color=COLORS[0],   label='No-Cloud'),
         mpatches.Patch(color=COLORS[255], label='Ignore/No-Data'),
     ]
@@ -248,7 +252,9 @@ def _save_panel(rgb_v: np.ndarray, mask: np.ndarray,
 
 def compare_scene(scene_dir: str, exp_name: str,
                   gpu_id: list, out_dir: str,
-                  label_path: str = None):
+                  label_path: str = None,
+                  stage: int = 3,
+                  inp_mode: str = 'swirndsi'):
 
     scene_id = Path(scene_dir).name
     print(f"\n[{scene_id}]")
@@ -274,7 +280,8 @@ def compare_scene(scene_dir: str, exp_name: str,
     fmask = qa_pixel_to_binary(qa)
 
     # ── 모델 추론 ──
-    pred = run_scene_inference(spectral, exp_name, gpu_id)
+    pred = run_scene_inference(spectral, exp_name, gpu_id,
+                               stage=stage, inp_mode=inp_mode)
     pred[fmask == 255] = 255   # fill 픽셀은 모델 예측 무시, no-data로 표시
 
     # ── 다운샘플링 ──
@@ -313,6 +320,28 @@ def compare_scene(scene_dir: str, exp_name: str,
         print(f"  저장: {gt_path}")
 
 
+# ── inp_mode 자동 감지 ────────────────────────────────────────────────
+
+def _detect_inp_mode(exp_name: str) -> str:
+    """체크포인트에서 inp_mode를 읽어 반환. 구버전(함수명 형식)도 역매핑 처리."""
+    import torch
+    from utils.dir_paths import EXP_DATA_PATH
+    from dataset.network_input import _PRESET_MODES
+
+    ckpt_path = os.path.join(EXP_DATA_PATH, exp_name, 'model', 'model_best.pth')
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    saved = ckpt.get('inp_mode', 'swirndsi')
+
+    # 구버전 호환: 함수명(inp_xxx)으로 저장된 경우 모드 키로 역매핑
+    if saved.startswith('inp_'):
+        for key, (fn, _) in _PRESET_MODES.items():
+            if fn.__name__ == saved:
+                return key
+        raise ValueError(f'체크포인트의 inp_mode "{saved}"를 _PRESET_MODES에서 찾을 수 없음')
+
+    return saved
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 def get_args():
@@ -322,6 +351,10 @@ def get_args():
                    help='수동 라벨 GeoTIFF 경로 (생략 시 GT 패널 미생성 — train 씬에 사용)')
     p.add_argument('--exp',         required=True,
                    help='실험 이름 (e.g. swirndsi_trial2_stage0)')
+    p.add_argument('--stage',       type=int, default=3,
+                   help='모델 스테이지 (0-3, 네트워크 구조 결정)')
+    p.add_argument('--inp_mode',    default=None,
+                   help='입력 모드 (생략 시 체크포인트에서 자동 감지)')
     p.add_argument('--gpu',         type=int, nargs='+', default=[0])
     p.add_argument('--out',         default='vis_output/')
     return p.parse_args()
@@ -329,10 +362,14 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
+    inp_mode = args.inp_mode or _detect_inp_mode(args.exp)
+    print(f"  inp_mode: {inp_mode}")
     compare_scene(
         scene_dir  = args.scene_dir,
         exp_name   = args.exp,
         gpu_id     = args.gpu,
         out_dir    = args.out,
         label_path = args.label_path,
+        stage      = args.stage,
+        inp_mode   = inp_mode,
     )

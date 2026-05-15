@@ -34,11 +34,12 @@ import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
 
 # ── 상수 ───────────────────────────────────────────────────────────────
-BINARY_CLASS_NAMES  = {0: 'No-Cloud', 1: 'Cloud', 255: 'No-Data'}
+BINARY_CLASS_NAMES  = {0: 'No-Cloud', 1: 'Cloud', 2: 'Cloud Shadow', 255: 'No-Data'}
 BINARY_CLASS_COLORS = {
-    0:   (0.13, 0.55, 0.13),  # Green  – No-Cloud
-    1:   (1.0,  1.0,  1.0),   # White  – Cloud
-    255: (0.0,  0.0,  0.0),   # Black  – No-Data
+    0:   (0.13, 0.55, 0.13),  # Green    – No-Cloud
+    1:   (1.0,  1.0,  1.0),   # White    – Cloud
+    2:   (0.72, 0.53, 0.90),  # 연보라색  – Cloud Shadow
+    255: (0.0,  0.0,  0.0),   # Black    – No-Data
 }
 
 
@@ -71,7 +72,7 @@ def print_zarr_info(path: str, store: zarr.Group):
                 cnt = int((lbl == cls).sum())
                 pct = cnt / total * 100
                 bar = '█' * int(pct / 2)
-                print(f'    {cls:3d} {name:<10}: {cnt:>6} px ({pct:5.1f}%) {bar}')
+                print(f'    {cls:3d} {name:<13}: {cnt:>6} px ({pct:5.1f}%) {bar}')
 
     print('=' * 65)
 
@@ -89,7 +90,7 @@ def label_to_rgb(lbl: np.ndarray) -> np.ndarray:
 def make_legend_patches():
     return [mpatches.Patch(color=BINARY_CLASS_COLORS[c],
                            label=BINARY_CLASS_NAMES[c])
-            for c in [0, 1, 255]]
+            for c in [0, 1, 2, 255]]
 
 
 # ── 패치 위치 계산 ─────────────────────────────────────────────────────
@@ -276,11 +277,11 @@ def visualize_patch(path: str, save: bool = False, out_dir: str = '.',
     # Pixel count bar chart
     ax_bar = _ax(stat_row, 2)
     _style(ax_bar)
-    counts     = [(label == c).sum() for c in [0, 1]]
-    colors_bar = [BINARY_CLASS_COLORS[c] for c in [0, 1]]
-    ax_bar.bar([0, 1], counts, color=colors_bar, edgecolor='#333355')
-    ax_bar.set_xticks([0, 1])
-    ax_bar.set_xticklabels(['No-Cloud', 'Cloud'], fontsize=8, color='#aaaaaa')
+    counts     = [(label == c).sum() for c in [0, 1, 2]]
+    colors_bar = [BINARY_CLASS_COLORS[c] for c in [0, 1, 2]]
+    ax_bar.bar([0, 1, 2], counts, color=colors_bar, edgecolor='#333355')
+    ax_bar.set_xticks([0, 1, 2])
+    ax_bar.set_xticklabels(['No-Cloud', 'Cloud', 'Shadow'], fontsize=8, color='#aaaaaa')
     ax_bar.set_title('Class Pixel Count', color='#e0e0ff', fontsize=9, pad=4)
 
     # Spectral mean line
