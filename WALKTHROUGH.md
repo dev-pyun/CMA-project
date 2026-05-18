@@ -1391,3 +1391,51 @@ conda run -n remote python vis_pca.py \
     --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
     --n 3 --out pca_vis/ --seed 42 --standardize
 ```
+
+---
+
+## 2026-05-18 | Global 표준화 통계 계산 + vis_pca global_stats 지원
+
+### utils/compute_global_stats.py (신규)
+Weddell Sea 전체 씬(5,399개)에서 밴드별 global mean/std 계산.
+
+- `find_scenes()` / `load_scene()` 으로 전체 씬 순회
+- 공간 다운샘플링 (`--max_size 300`, 기본값)
+- Chan's parallel algorithm — 메모리 효율적 단일 패스
+- fill 픽셀 제외: 어느 밴드라도 값이 0인 픽셀은 stats에서 제외
+- 출력: `data/global_spectral_stats.npz` (mean, std, count, bands, n_scenes)
+
+```bash
+conda run -n remote python utils/compute_global_stats.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --max_size 300
+```
+
+### vis_pca.py 변경
+- `load_global_stats(path)` 함수 추가
+- `fit_pca(standardize, global_stats)` / `compute_pca(standardize, global_stats)` 파라미터 추가
+  - `global_stats` 지정 시: 고정된 전역 mean/std로 표준화 → 씬 간 동일 좌표계
+  - 미지정 시: per-scene mean/std (기존 동작 유지)
+- `--global_stats PATH` CLI 플래그 추가 (지정 시 자동으로 --standardize 활성화)
+
+### vis_pca_transfer.py 변경
+- `--global_stats PATH` CLI 플래그 추가
+- `fit_pca()` / `apply_pca()` 에 global_stats/scaler 전달
+
+### 실행 순서
+```bash
+# 1. 전체 씬 통계 계산 (1회만)
+conda run -n remote python utils/compute_global_stats.py
+
+# 2. Global 표준화 PCA 시각화
+conda run -n remote python vis_pca.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --n 3 --out pca_vis/ --seed 42 \
+    --global_stats src/data/global_spectral_stats.npz
+
+# 3. Cross-scene transfer (global 표준화 포함)
+conda run -n remote python vis_pca_transfer.py \
+    --scene_a $SCENE_A --scene_b $SCENE_B \
+    --out pca_vis/ \
+    --global_stats src/data/global_spectral_stats.npz
+```

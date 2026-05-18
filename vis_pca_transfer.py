@@ -40,7 +40,7 @@ from sklearn.decomposition import PCA
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vis_cv_features import load_scene, pnorm
 from vis_pca import (
-    fit_pca, compute_correlations,
+    fit_pca, load_global_stats, compute_correlations,
     plot_correlation_heatmap, save_correlation_csv,
 )
 
@@ -212,6 +212,8 @@ def main() -> None:
                         help='Target scene directory (PCA transferred here)')
     parser.add_argument('--out', default='pca_vis/',
                         help='Output directory (default: pca_vis/)')
+    parser.add_argument('--global_stats', default=None,
+                        help='Path to global_spectral_stats.npz for standardized PCA')
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -225,8 +227,13 @@ def main() -> None:
     sp_a = load_scene(args.scene_a)
     print(f'  Shape: {sp_a.shape}')
     print('  Fitting PCA(8)...')
-    pca_model, maps_a, explained_a, scaler_a = fit_pca(sp_a)
-    print('  Explained variance: '
+    gstats = load_global_stats(args.global_stats) if args.global_stats else None
+    std_flag = gstats is not None
+
+    pca_model, maps_a, explained_a, scaler_a = fit_pca(
+        sp_a, standardize=std_flag, global_stats=gstats)
+    std_label = ' [global-std]' if gstats else ''
+    print(f'  Explained variance{std_label}: '
           + ', '.join(f'PC{i+1}={v*100:.1f}%' for i, v in enumerate(explained_a))
           + f'  [total={explained_a.sum()*100:.1f}%]')
 
