@@ -87,8 +87,8 @@ def get_args(argv=None):
                              '(e.g. --indices NDSI NDWI NDVI)')
 
     # Reproducibility
-    parser.add_argument('--seed', type=int, default=None,
-                        help='Random seed')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed (default: 42)')
 
     # Hardware
     parser.add_argument('-gpu', '--gpu_id', type=int, nargs='+', default=[0],

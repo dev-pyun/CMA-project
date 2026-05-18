@@ -1279,3 +1279,40 @@ conda run -n remote python vis_cv_features.py \
 - `ROW_LABELS` 업데이트: `'Spectral Index'` → `'Spectral Index + Color'`, `'Lab / FFT'` 추가
 - `plot_grid()`: `ROWS = 7`로 수정
 - 모듈 docstring 업데이트
+
+---
+
+## 2026-05-18 | train.py seed 기본값 변경 + vis_pca.py 신규 생성
+
+### 변경 내용
+
+#### 1. `train.py`
+- `--seed` 기본값 `None` → **`42`** 로 변경
+  - 이전: 시드 미지정 시 재현 불가
+  - 이후: 매 학습 기본적으로 seed=42 고정 (오버라이드 가능: `--seed 0` 등)
+
+#### 2. `vis_pca.py` (신규)
+Landsat 8 씬에 대해 PCA 8개 성분을 시각화하고 밴드 상관관계를 추출하는 스크립트.
+
+**출력 파일 (씬당 3개):**
+| 파일 | 내용 |
+|------|------|
+| `{sid}_pca_grid.png` | 3×3 그리드: (0,0)=FCI, 나머지=PC1~PC8 |
+| `{sid}_pca_corr.png` | 8×8 Pearson 상관관계 히트맵 |
+| `{sid}_pca_corr.csv` | 상관계수 수치 (PC × Band) |
+
+**3×3 그리드 구성:**
+- **(0,0)**: FCI (False Color Infrared) — B5(NIR)/B4(Red)/B3(Green) 합성
+- **(0,1)~(2,2)**: PC1~PC8, 각각 explained variance % 표시
+
+**상관관계 히트맵:**
+- 행(row): PC1~PC8
+- 열(col): B1~B7, B9 (8개 밴드)
+- 값: Pearson r ∈ [-1, 1], 셀 내 수치 표기
+
+**실행:**
+```bash
+conda run -n remote python vis_pca.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --n 3 --out pca_vis/ --seed 42
+```
