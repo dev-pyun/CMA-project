@@ -1294,10 +1294,11 @@ conda run -n remote python vis_cv_features.py \
 #### 2. `vis_pca.py` (신규)
 Landsat 8 씬에 대해 PCA 8개 성분을 시각화하고 밴드 상관관계를 추출하는 스크립트.
 
-**출력 파일 (씬당 3개):**
+**출력 파일 (씬당 4개):**
 | 파일 | 내용 |
 |------|------|
 | `{sid}_pca_grid.png` | 3×3 그리드: (0,0)=FCI, 나머지=PC1~PC8 |
+| `{sid}_pc1_pc2.png` | PC1 vs PC2 scatter (hexbin density + luminance 색상) |
 | `{sid}_pca_corr.png` | 8×8 Pearson 상관관계 히트맵 |
 | `{sid}_pca_corr.csv` | 상관계수 수치 (PC × Band) |
 
@@ -1315,4 +1316,42 @@ Landsat 8 씬에 대해 PCA 8개 성분을 시각화하고 밴드 상관관계�
 conda run -n remote python vis_pca.py \
     --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
     --n 3 --out pca_vis/ --seed 42
+```
+
+---
+
+## 2026-05-18 | vis_pca.py scatter 추가 + vis_pca_transfer.py 신규
+
+### vis_pca.py 변경
+- `fit_pca()` 신규 추가: PCA 모델 객체도 반환 (`pca_model, maps, explained`)
+- `compute_pca()` → `fit_pca()` 래퍼로 변경 (기존 호출 유지)
+- `plot_pca_scatter()` 신규 추가: PC1(x) vs PC2(y) 1×2 그림
+  - 좌: hexbin log density
+  - 우: scatter 색상=luminance (구름/눈=밝음, 그림자/수면=어두움)
+  - max 200k 픽셀 서브샘플링
+
+### vis_pca_transfer.py 신규
+Scene A에서 피팅된 PCA를 Scene B에 전이 적용.
+
+**출력 파일:**
+| 파일 | 내용 |
+|------|------|
+| `{tag}_grid.png` | 2×5 비교 그리드: Row0=A(fit), Row1=B(transfer), PC1-4 동일 스케일 |
+| `{tag}_scatter.png` | 1×3: 오버레이 scatter + hexbin A + hexbin B (동일 좌표계) |
+| `{sid_a}_corr.png/csv` | Scene A 밴드 상관관계 |
+| `{sid_b}_corr_transfer.png/csv` | Scene B 밴드 상관관계 (A의 PCA 적용 후) |
+
+**해석 기준:**
+- scatter 분포가 겹침 → PCA 전이 일관성 있음 → 피처로 활용 가능
+- PC 맵 스케일이 B에서 크게 차이남 → 씬별 정규화 필요
+
+**실행 (두 씬 지정):**
+```bash
+SCENE_A=/earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea/2020/12/20201213/LC08_L1GT_215108_20201213_20210314_02_T2
+SCENE_B=/earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea/2024/12/20241206/LC08_L1GT_201110_20241206_20241210_02_T2
+
+conda run -n remote python vis_pca_transfer.py \
+    --scene_a $SCENE_A \
+    --scene_b $SCENE_B \
+    --out pca_vis/
 ```
