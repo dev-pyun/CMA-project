@@ -47,9 +47,12 @@ from vis_pca import (
 
 # ── PCA transfer ───────────────────────────────────────────────────────
 
-def apply_pca(pca_model: PCA, spectral: np.ndarray) -> np.ndarray:
+def apply_pca(pca_model: PCA, spectral: np.ndarray,
+              scaler: dict | None = None) -> np.ndarray:
     """
     Apply a pre-fitted PCA (from scene A) to a new scene B.
+    If scaler is provided (fitted on A), the same z-score normalization
+    is applied to B before transforming — required for standardized PCA transfer.
 
     Returns
     -------
@@ -60,9 +63,13 @@ def apply_pca(pca_model: PCA, spectral: np.ndarray) -> np.ndarray:
     X = f.reshape(-1, 8)
     valid = np.isfinite(X).all(axis=1)
 
+    X_transform = X[valid].copy()
+    if scaler is not None:
+        X_transform = (X_transform - scaler['mean']) / scaler['std']
+
     scores = np.zeros((H * W, 8), dtype=np.float32)
     if valid.sum() > 8:
-        scores[valid] = pca_model.transform(X[valid]).astype(np.float32)
+        scores[valid] = pca_model.transform(X_transform).astype(np.float32)
     return scores.reshape(H, W, 8)
 
 
@@ -218,7 +225,7 @@ def main() -> None:
     sp_a = load_scene(args.scene_a)
     print(f'  Shape: {sp_a.shape}')
     print('  Fitting PCA(8)...')
-    pca_model, maps_a, explained_a = fit_pca(sp_a)
+    pca_model, maps_a, explained_a, scaler_a = fit_pca(sp_a)
     print('  Explained variance: '
           + ', '.join(f'PC{i+1}={v*100:.1f}%' for i, v in enumerate(explained_a))
           + f'  [total={explained_a.sum()*100:.1f}%]')
@@ -229,7 +236,7 @@ def main() -> None:
     sp_b = load_scene(args.scene_b)
     print(f'  Shape: {sp_b.shape}')
     print("  Applying A's PCA to B...")
-    maps_b = apply_pca(pca_model, sp_b)
+    maps_b = apply_pca(pca_model, sp_b, scaler=scaler_a)
 
     # ── Plots ─────────────────────────────────────────────────────────
     print('\nPlotting PC1-4 transfer grid...')

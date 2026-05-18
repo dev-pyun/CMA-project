@@ -1355,3 +1355,39 @@ conda run -n remote python vis_pca_transfer.py \
     --scene_b $SCENE_B \
     --out pca_vis/
 ```
+
+---
+
+## 2026-05-18 | vis_pca.py standardization 추가
+
+### 변경 내용
+
+**`vis_pca.py`**
+- `fit_pca(spectral, standardize=False)` — standardize 파라미터 추가
+  - `standardize=True`: 각 밴드를 z-score 정규화 후 PCA → correlation 기반 PCA
+  - 반환값에 `scaler={'mean':(8,), 'std':(8,)}` 추가 (transfer에서 재사용)
+- `compute_pca(spectral, standardize=False)` — 파라미터 전달
+- `_scatter_data()` / `_draw_scatter_panels()` 헬퍼 함수로 scatter 로직 분리
+- `plot_pca_scatter()` — `title_suffix` 파라미터 추가
+- `plot_std_comparison()` 신규 — 2×2 grid: Raw(top) vs Standardized(bottom)
+- `--standardize` CLI 플래그 추가:
+  - 미지정: raw PCA만 기존과 동일하게 출력
+  - 지정 시: raw + std 각각 출력 + `{sid}_pca_std_comparison.png` 추가
+
+**`vis_pca_transfer.py`**
+- `apply_pca(pca_model, spectral, scaler=None)` — scaler 파라미터 추가
+  - scaler가 있으면 scene B 데이터에도 A의 z-score 정규화 적용
+- `main()`: `fit_pca` 반환값에서 `scaler_a` 추출 → `apply_pca`에 전달
+
+### 실행
+```bash
+# raw PCA만 (기존과 동일)
+conda run -n remote python vis_pca.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --n 3 --out pca_vis/ --seed 42
+
+# raw + standardized 비교
+conda run -n remote python vis_pca.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --n 3 --out pca_vis/ --seed 42 --standardize
+```

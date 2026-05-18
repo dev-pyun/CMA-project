@@ -8,10 +8,19 @@ For each sampled scene:
   4. Saves an 8×8 Pearson-correlation heatmap (PCA component × spectral band).
   5. Saves correlation values as CSV.
 
+With --standardize: also runs z-score standardized PCA and saves an additional
+2×2 comparison scatter (raw vs standardized) alongside the separate outputs.
+
 Usage:
+    # Raw PCA only
     conda run -n remote python vis_pca.py \\
         --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \\
         --n 3 --out pca_vis/ --seed 42
+
+    # Raw + standardized PCA comparison
+    conda run -n remote python vis_pca.py \\
+        --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \\
+        --n 3 --out pca_vis/ --seed 42 --standardize
 """
 
 import argparse
@@ -36,32 +45,47 @@ PC_LABELS   = [f'PC{i + 1}' for i in range(8)]
 
 # ── PCA computation ────────────────────────────────────────────────────
 
-def fit_pca(spectral: np.ndarray):
+def fit_pca(spectral: np.ndarray, standardize: bool = False):
     """
     Fit PCA(8) on (H, W, 8) uint16 spectral array.
+
+    Parameters
+    ----------
+    standardize : if True, z-score each band before PCA (correlation-based PCA).
+                  Each band gets equal weight regardless of its raw variance.
 
     Returns
     -------
     pca_model : fitted sklearn PCA object (reusable for transfer)
     pca_maps  : (H, W, 8) float32  — per-pixel component scores
     explained : (8,)      float64  — explained variance ratio per PC
+    scaler    : {'mean': (8,), 'std': (8,)} if standardize else None
     """
     H, W, _ = spectral.shape
     f = spectral.astype(np.float32) / 10000.0
     X = f.reshape(-1, 8)
     valid = np.isfinite(X).all(axis=1)
 
+    X_fit = X[valid].copy()
+    scaler = None
+    if standardize:
+        mean = X_fit.mean(axis=0)
+        std  = X_fit.std(axis=0)
+        std[std < 1e-9] = 1.0          # guard zero-variance bands
+        X_fit = (X_fit - mean) / std
+        scaler = {'mean': mean, 'std': std}
+
     pca = PCA(n_components=8, random_state=42)
     scores = np.zeros((H * W, 8), dtype=np.float32)
     if valid.sum() > 8:
-        scores[valid] = pca.fit_transform(X[valid]).astype(np.float32)
+        scores[valid] = pca.fit_transform(X_fit).astype(np.float32)
 
-    return pca, scores.reshape(H, W, 8), pca.explained_variance_ratio_
+    return pca, scores.reshape(H, W, 8), pca.explained_variance_ratio_, scaler
 
 
-def compute_pca(spectral: np.ndarray):
-    """Convenience wrapper — returns (pca_maps, explained) without the model."""
-    _, maps, explained = fit_pca(spectral)
+def compute_pca(spectral: np.ndarray, standardize: bool = False):
+    """Convenience wrapper — returns (pca_maps, explained) without model/scaler."""
+    _, maps, explained, _ = fit_pca(spectral, standardize=standardize)
     return maps, explained
 
 
@@ -153,51 +177,74 @@ def plot_correlation_heatmap(corr: np.ndarray, scene_id: str,
     print(f"  → {out_path}")
 
 
-def plot_pca_scatter(spectral: np.ndarray, pca_maps: np.ndarray,
-                     scene_id: str, out_path: str,
-                     max_pixels: int = 200_000) -> None:
-    """
-    1×2 scatter of PC1 (x) vs PC2 (y) for every pixel.
-      Left  : hexbin density (log scale)
-      Right : scatter colored by luminance (bright=cloud/snow, dark=shadow)
-    Subsampled to max_pixels for speed.
-    """
+def _scatter_data(spectral: np.ndarray, pca_maps: np.ndarray,
+                  max_pixels: int = 200_000):
+    """Extract and subsample (pc1, pc2, luminance) vectors for scatter plots."""
     f   = spectral.astype(np.float32) / 10000.0
-    lum = (0.2989 * f[:, :, 3] + 0.5870 * f[:, :, 2]
-           + 0.1140 * f[:, :, 1])          # luminance from R/G/B
-
-    pc1 = pca_maps[:, :, 0].ravel()
-    pc2 = pca_maps[:, :, 1].ravel()
+    lum = (0.2989 * f[:, :, 3] + 0.5870 * f[:, :, 2] + 0.1140 * f[:, :, 1])
+    pc1, pc2 = pca_maps[:, :, 0].ravel(), pca_maps[:, :, 1].ravel()
     lum_flat = lum.ravel()
-    valid = np.isfinite(pc1) & np.isfinite(pc2) & np.isfinite(lum_flat)
-    pc1_v, pc2_v, lum_v = pc1[valid], pc2[valid], lum_flat[valid]
+    ok = np.isfinite(pc1) & np.isfinite(pc2) & np.isfinite(lum_flat)
+    pc1, pc2, lum_flat = pc1[ok], pc2[ok], lum_flat[ok]
+    if len(pc1) > max_pixels:
+        idx = np.random.default_rng(42).choice(len(pc1), max_pixels, replace=False)
+        pc1, pc2, lum_flat = pc1[idx], pc2[idx], lum_flat[idx]
+    return pc1, pc2, lum_flat
 
-    if len(pc1_v) > max_pixels:
-        rng = np.random.default_rng(42)
-        idx = rng.choice(len(pc1_v), max_pixels, replace=False)
-        pc1_v, pc2_v, lum_v = pc1_v[idx], pc2_v[idx], lum_v[idx]
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle(f'PC1 vs PC2 — {scene_id}', fontsize=10, fontweight='bold')
-
-    # Left: density hexbin
-    hb = axes[0].hexbin(pc1_v, pc2_v, gridsize=100, cmap='viridis',
+def _draw_scatter_panels(axes, pc1, pc2, lum, title_prefix: str) -> None:
+    """Draw hexbin (left) + luminance scatter (right) into a pair of axes."""
+    hb = axes[0].hexbin(pc1, pc2, gridsize=100, cmap='viridis',
                         bins='log', mincnt=1)
     plt.colorbar(hb, ax=axes[0], label='log₁₀(pixel count)')
-    axes[0].set_xlabel('PC1', fontsize=11)
-    axes[0].set_ylabel('PC2', fontsize=11)
-    axes[0].set_title('Density', fontsize=10)
+    axes[0].set_xlabel('PC1', fontsize=10); axes[0].set_ylabel('PC2', fontsize=10)
+    axes[0].set_title(f'{title_prefix} — Density', fontsize=10)
 
-    # Right: luminance-colored scatter (bright=cloud/snow, dark=shadow/water)
-    sc = axes[1].scatter(pc1_v, pc2_v, c=lum_v, cmap='gray',
-                         s=0.3, alpha=0.25, vmin=0, vmax=0.7,
-                         rasterized=True)
+    sc = axes[1].scatter(pc1, pc2, c=lum, cmap='gray',
+                         s=0.3, alpha=0.25, vmin=0, vmax=0.7, rasterized=True)
     plt.colorbar(sc, ax=axes[1], label='Luminance  (bright=cloud/snow)')
-    axes[1].set_xlabel('PC1', fontsize=11)
-    axes[1].set_ylabel('PC2', fontsize=11)
-    axes[1].set_title('Luminance color', fontsize=10)
+    axes[1].set_xlabel('PC1', fontsize=10); axes[1].set_ylabel('PC2', fontsize=10)
+    axes[1].set_title(f'{title_prefix} — Luminance color', fontsize=10)
 
+
+def plot_pca_scatter(spectral: np.ndarray, pca_maps: np.ndarray,
+                     scene_id: str, out_path: str,
+                     title_suffix: str = '',
+                     max_pixels: int = 200_000) -> None:
+    """1×2 scatter: hexbin density (left) + luminance color (right)."""
+    pc1, pc2, lum = _scatter_data(spectral, pca_maps, max_pixels)
+    suffix = f'  [{title_suffix}]' if title_suffix else ''
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle(f'PC1 vs PC2{suffix} — {scene_id}',
+                 fontsize=10, fontweight='bold')
+    _draw_scatter_panels(axes, pc1, pc2, lum, title_suffix or 'Raw')
     plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  → {out_path}")
+
+
+def plot_std_comparison(spectral: np.ndarray,
+                        maps_raw: np.ndarray, maps_std: np.ndarray,
+                        scene_id: str, out_path: str,
+                        max_pixels: int = 200_000) -> None:
+    """
+    2×2 comparison scatter: Raw PCA (top row) vs Standardized PCA (bottom row).
+    Left col = density hexbin, right col = luminance color scatter.
+    Rows use independent axis scales since raw/std have different PC units.
+    """
+    pc1_r, pc2_r, lum_r = _scatter_data(spectral, maps_raw, max_pixels)
+    pc1_s, pc2_s, lum_s = _scatter_data(spectral, maps_std, max_pixels)
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 10),
+                             gridspec_kw={'hspace': 0.45, 'wspace': 0.3})
+    fig.suptitle(f'PCA: Raw vs Standardized — {scene_id}',
+                 fontsize=11, fontweight='bold')
+
+    _draw_scatter_panels(axes[0], pc1_r, pc2_r, lum_r, 'Raw (covariance)')
+    _draw_scatter_panels(axes[1], pc1_s, pc2_s, lum_s, 'Standardized (correlation)')
+
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -226,6 +273,9 @@ def main() -> None:
                         help='Output directory (default: pca_vis/)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
+    parser.add_argument('--standardize', action='store_true', default=False,
+                        help='Also run z-score standardized PCA and save '
+                             'comparison outputs (*_std suffix)')
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -252,35 +302,47 @@ def main() -> None:
             spectral = load_scene(scene_dir)
             print(f'  Shape: {spectral.shape}')
 
-            print('  Computing PCA(8)...')
-            pca_maps, explained = compute_pca(spectral)
-            total_var = explained.sum() * 100
-            print(f'  Explained variance: '
-                  + ', '.join(f'PC{i+1}={v*100:.1f}%'
-                               for i, v in enumerate(explained))
-                  + f'  [total={total_var:.1f}%]')
+            def _run_pca(std: bool, suffix: str) -> None:
+                tag = f'  [{suffix}]' if suffix else ''
+                print(f'  Computing PCA(8){tag}...')
+                pca_maps, explained = compute_pca(spectral, standardize=std)
+                print(f'  Explained variance: '
+                      + ', '.join(f'PC{i+1}={v*100:.1f}%'
+                                   for i, v in enumerate(explained))
+                      + f'  [total={explained.sum()*100:.1f}%]')
 
-            print('  Plotting 3×3 grid...')
-            plot_pca_grid(
-                spectral, pca_maps, explained, sid,
-                os.path.join(args.out, f'{sid}_pca_grid.png'))
+                pfx = f'{sid}_pca'
+                if suffix:
+                    pfx += f'_{suffix}'
 
-            print('  Plotting PC1 vs PC2 scatter...')
-            plot_pca_scatter(
-                spectral, pca_maps, sid,
-                os.path.join(args.out, f'{sid}_pc1_pc2.png'))
+                plot_pca_grid(
+                    spectral, pca_maps, explained,
+                    f'{sid}  [{suffix}]' if suffix else sid,
+                    os.path.join(args.out, f'{pfx}_grid.png'))
 
-            print('  Computing band correlations...')
-            corr = compute_correlations(pca_maps, spectral)
+                plot_pca_scatter(
+                    spectral, pca_maps, sid,
+                    os.path.join(args.out, f'{pfx}_pc1_pc2.png'),
+                    title_suffix=suffix)
 
-            print('  Plotting correlation heatmap...')
-            plot_correlation_heatmap(
-                corr, sid,
-                os.path.join(args.out, f'{sid}_pca_corr.png'))
+                corr = compute_correlations(pca_maps, spectral)
+                plot_correlation_heatmap(
+                    corr, f'{sid}  [{suffix}]' if suffix else sid,
+                    os.path.join(args.out, f'{pfx}_corr.png'))
+                save_correlation_csv(
+                    corr,
+                    os.path.join(args.out, f'{pfx}_corr.csv'))
 
-            save_correlation_csv(
-                corr,
-                os.path.join(args.out, f'{sid}_pca_corr.csv'))
+                return pca_maps
+
+            maps_raw = _run_pca(std=False, suffix='')
+
+            if args.standardize:
+                maps_std = _run_pca(std=True, suffix='std')
+                print('  Plotting Raw vs Std comparison...')
+                plot_std_comparison(
+                    spectral, maps_raw, maps_std, sid,
+                    os.path.join(args.out, f'{sid}_pca_std_comparison.png'))
 
         except Exception as e:
             print(f'  ERROR: {e}')
