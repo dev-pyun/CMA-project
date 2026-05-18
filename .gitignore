@@ -1,14 +1,34 @@
-# Ignore large data directories
+# Large data & model directories
 /data/
 /exp_data/
 /results/
 
-# Ignore generated label and prepared files
+# Model weights
+*.pth
+*.pt
+*.ckpt
+
+# Logs
+logs/
+*.log
+nohup.out
+
+# Visualisation outputs
+vis_output/
+output_vis/
+cv_vis/
+pca_vis/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Generated label / prepared files
 label_code/prepared/
 label_code/labels/
 
+# Misc
 *.pdf
-
-vis_output/
-cv_vis/
-pca_vis/
+.DS_Store
