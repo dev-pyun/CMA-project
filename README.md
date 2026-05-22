@@ -308,38 +308,29 @@ python inspect_zarr.py data/VALIDATION_ZARR/ --sample 9 --save --out output_vis/
 
 ---
 
-## GitHub 토큰 발급 및 push 설정
+## GitHub push 설정 (SSH 키)
 
-GitHub에 코드를 push할 때 HTTPS 인증이 필요합니다. 비밀번호 대신 Personal Access Token(PAT)을 사용합니다.
+SSH 키 인증으로 설정되어 있습니다. 토큰 만료 없이 영구 사용 가능합니다.
 
-### 토큰 발급 방법
-
-1. GitHub 로그인 → 우측 상단 프로필 → **Settings**
-2. 좌측 메뉴 하단 → **Developer settings**
-3. **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)**
-4. Note에 이름 입력 (예: `planck-server`)
-5. Expiration 설정 (90일 권장)
-6. Scope 체크:
-   - `repo` (전체 체크)
-7. **Generate token** 클릭 → 토큰 복사 (이 창 닫으면 다시 볼 수 없음!)
-
-### 서버에 토큰 등록
+### 현재 설정 확인
 
 ```bash
-# 방법 1: remote URL에 토큰 포함 (간단, 보안 주의)
-git remote set-url origin https://<TOKEN>@github.com/dev-pyun/CMA-project.git
-
-# 방법 2: credential helper로 캐싱 (권장)
-git config --global credential.helper store
-git push origin main
-# → Username: dev-pyun
-# → Password: <TOKEN> 입력
-# 이후 자동 저장됨
+git remote -v
+# origin  git@github.com:dev-pyun/CMA-project.git (fetch/push) 이어야 함
 ```
 
-### 토큰 만료 시
+### 새 서버에서 설정할 때
 
 ```bash
-# 새 토큰 발급 후 다시 등록
-git remote set-url origin https://<NEW_TOKEN>@github.com/dev-pyun/CMA-project.git
+# 1. SSH 키 생성
+ssh-keygen -t ed25519 -C "your_email@example.com"
+
+# 2. 공개키 확인 → GitHub Settings → SSH and GPG keys → New SSH key에 붙여넣기
+cat ~/.ssh/id_ed25519.pub
+
+# 3. remote URL을 SSH로 변경
+git remote set-url origin git@github.com:dev-pyun/CMA-project.git
+
+# 4. 연결 확인
+ssh -T git@github.com
 ```

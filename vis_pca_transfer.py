@@ -40,7 +40,7 @@ from sklearn.decomposition import PCA
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vis_cv_features import load_scene, pnorm
 from vis_pca import (
-    fit_pca, load_global_stats, compute_correlations,
+    fit_pca, load_global_stats, load_global_pca, compute_correlations,
     plot_correlation_heatmap, save_correlation_csv,
 )
 
@@ -61,13 +61,14 @@ def apply_pca(pca_model: PCA, spectral: np.ndarray,
     H, W, _ = spectral.shape
     f = spectral.astype(np.float32) / 10000.0
     X = f.reshape(-1, 8)
-    valid = np.isfinite(X).all(axis=1)
+    fill  = (spectral.reshape(-1, 8) == 0).any(axis=1)
+    valid = np.isfinite(X).all(axis=1) & ~fill
 
     X_transform = X[valid].copy()
     if scaler is not None:
         X_transform = (X_transform - scaler['mean']) / scaler['std']
 
-    scores = np.zeros((H * W, 8), dtype=np.float32)
+    scores = np.full((H * W, 8), np.nan, dtype=np.float32)
     if valid.sum() > 8:
         scores[valid] = pca_model.transform(X_transform).astype(np.float32)
     return scores.reshape(H, W, 8)
@@ -213,7 +214,10 @@ def main() -> None:
     parser.add_argument('--out', default='pca_vis/',
                         help='Output directory (default: pca_vis/)')
     parser.add_argument('--global_stats', default=None,
-                        help='Path to global_spectral_stats.npz for standardized PCA')
+                        help='Path to global_spectral_stats.npz for per-scene standardized PCA')
+    parser.add_argument('--global_pca', default=None,
+                        help='Path to global_pca.npz. All scenes use the same '
+                             'pre-fitted eigenvectors — no per-scene fit.')
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -221,29 +225,47 @@ def main() -> None:
     sid_b = Path(args.scene_b).name
     tag   = f'{sid_a[:28]}_to_{sid_b[:28]}'
 
-    # ── Load and fit scene A ───────────────────────────────────────────
-    print(f'[Scene A — fit]  {sid_a}')
+    gstats = load_global_stats(args.global_stats) if args.global_stats else None
+    gpca   = load_global_pca(args.global_pca)     if args.global_pca   else None
+
+    # ── Load and fit/apply scene A ─────────────────────────────────────
+    print(f'[Scene A]  {sid_a}')
     print('  Loading...')
     sp_a = load_scene(args.scene_a)
     print(f'  Shape: {sp_a.shape}')
-    print('  Fitting PCA(8)...')
-    gstats = load_global_stats(args.global_stats) if args.global_stats else None
-    std_flag = gstats is not None
+
+    if gpca is not None:
+        print('  Applying global PCA (no per-scene fit)...')
+        std_flag  = True
+        std_label = ' [global-PCA]'
+    elif gstats is not None:
+        print('  Fitting PCA(8) with global z-score...')
+        std_flag  = True
+        std_label = ' [global-std, per-scene fit]'
+    else:
+        print('  Fitting PCA(8) (raw)...')
+        std_flag  = False
+        std_label = ''
 
     pca_model, maps_a, explained_a, scaler_a = fit_pca(
-        sp_a, standardize=std_flag, global_stats=gstats)
-    std_label = ' [global-std]' if gstats else ''
+        sp_a, standardize=std_flag, global_stats=gstats, global_pca=gpca)
     print(f'  Explained variance{std_label}: '
           + ', '.join(f'PC{i+1}={v*100:.1f}%' for i, v in enumerate(explained_a))
           + f'  [total={explained_a.sum()*100:.1f}%]')
 
-    # ── Load scene B and apply A's PCA ────────────────────────────────
-    print(f'\n[Scene B — transfer]  {sid_b}')
+    # ── Load scene B and apply ────────────────────────────────────────
+    print(f'\n[Scene B]  {sid_b}')
     print('  Loading...')
     sp_b = load_scene(args.scene_b)
     print(f'  Shape: {sp_b.shape}')
-    print("  Applying A's PCA to B...")
-    maps_b = apply_pca(pca_model, sp_b, scaler=scaler_a)
+
+    if gpca is not None:
+        # Same global eigenvectors — just transform
+        print('  Applying global PCA to B...')
+        _, maps_b, _, _ = fit_pca(sp_b, global_pca=gpca)
+    else:
+        print("  Applying A's PCA to B...")
+        maps_b = apply_pca(pca_model, sp_b, scaler=scaler_a)
 
     # ── Plots ─────────────────────────────────────────────────────────
     print('\nPlotting PC1-4 transfer grid...')

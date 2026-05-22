@@ -100,9 +100,9 @@ python label_scene.py \
     # GPU 있으면: --use_sam
 ```
 
-`--init_cfmask` 사용 시 CFMask의 cloud 픽셀(class 1)이 label 4(cloud)로 미리 칠해진 상태로 시작됩니다.
-shadow / snow / water / clear 영역은 0(미라벨)으로 시작하므로 직접 칠해야 합니다.
-오탐(cloud가 아닌데 칠해진 곳)은 `0` 키로 지우고, 미탐(칠해지지 않은 cloud)은 `4` 키로 추가합니다.
+`--init_cfmask` 사용 시 CFMask의 cloud 픽셀(class 1) → label 4(cloud), shadow 픽셀(class 2) → label 3(shadow)으로 미리 칠해진 상태로 시작됩니다.
+snow / water / clear 영역은 0(미라벨)으로 시작하므로 직접 칠해야 합니다.
+오탐(잘못 칠해진 곳)은 `0` 키로 지우고, 미탐(칠해지지 않은 cloud/shadow)은 `4`/`3` 키로 추가합니다.
 
 **napari 단축키:**
 

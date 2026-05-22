@@ -78,9 +78,9 @@ _CFMASK_COLORS = {
 # cfmask: 0=clear, 1=cloud, 2=shadow, 3=snow, 4=water, 255=fill
 # label : 0=미라벨, 1=water, 2=snow, 3=shadow, 4=cloud, 255=fill
 _CFMASK_TO_LABEL = np.array(
-    [0, 4, 0, 0, 0] + [0] * 250 + [255],
+    [0, 4, 3, 0, 0] + [0] * 250 + [255],
     dtype=np.uint8,
-)  # index = cfmask 값 — cloud(1)만 label 4로 초기화, 나머지는 미라벨(0)
+)  # index = cfmask 값 — cloud(1)→4, shadow(2)→3, 나머지는 미라벨(0)
 
 
 def cfmask_to_init_labels(cfmask: np.ndarray) -> np.ndarray:

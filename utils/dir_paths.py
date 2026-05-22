@@ -30,6 +30,10 @@ TEST_ZARR_PATH  = os.path.join(DATA_ROOT, 'TEST_ZARR')
 TRAIN_PATH = TRAIN_ZARR_PATH
 VALID_PATH  = VALID_ZARR_PATH
 
+# Global spectral statistics / PCA model (from utils/compute_global_stats.py)
+GLOBAL_STATS_PATH = os.path.join(DATA_ROOT, 'global_spectral_stats.npz')
+GLOBAL_PCA_PATH   = os.path.join(DATA_ROOT, 'global_pca.npz')
+
 # Experiment data directory (models, logs)
 EXP_DATA_PATH = os.path.join(PROJECT_ROOT, 'exp_data')
 

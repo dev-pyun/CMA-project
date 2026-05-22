@@ -5,18 +5,19 @@
 # Usage:
 #     ./pipeline.sh <experiment_name> [input_mode] [gpu_ids]
 #
-# Input modes  (H5 patches always contain B1–B7 + B9, 8 spectral channels):
+# Input modes  (Zarr patches contain B1–B7 + B9, 8 spectral channels):
 #   Preset:
-#     swirndsi      - B2–B7 + NDSI               (7 ch) [default]
-#     cirrus_ndsi     - B2–B7 + B9 + NDSI           (8 ch)
-#     cirrus_ndsindwi - B2–B7 + B9 + NDSI + NDWI  (9 ch)
-#     all_cirrus    - B1–B7 + B9                  (8 ch)
-#     allndsi       - B1–B7 + NDSI                (8 ch)
-#     swirndsindwi  - B2–B7 + NDSI + NDWI         (8 ch)
-#     swirndwi      - B2–B7 + NDWI                (7 ch)
-#     all           - B1–B7                       (7 ch)
-#     vnir          - B2–B5                       (4 ch)
-#     rgb           - B2–B4                       (3 ch)
+#     swirndsi        - B2–B7 + NDSI                        (7 ch) [default]
+#     swirndsi_pca3   - B2–B7 + NDSI + global PC1-3        (10 ch)  ← requires data/global_pca.npz
+#     cirrus_ndsi     - B2–B7 + B9 + NDSI                  (8 ch)
+#     cirrus_ndsindwi - B2–B7 + B9 + NDSI + NDWI           (9 ch)
+#     all_cirrus      - B1–B7 + B9                         (8 ch)
+#     allndsi         - B1–B7 + NDSI                       (8 ch)
+#     swirndsindwi    - B2–B7 + NDSI + NDWI                (8 ch)
+#     swirndwi        - B2–B7 + NDWI                       (7 ch)
+#     all             - B1–B7                              (7 ch)
+#     vnir            - B2–B5                              (4 ch)
+#     rgb             - B2–B4                              (3 ch)
 #   Custom (pass "custom" as mode and set --bands / --indices in train.py):
 #     python train.py ... --inp_mode custom --bands B2 B3 B4 B5 B9 --indices NDSI
 #
@@ -56,7 +57,7 @@ python train.py \
     -ip ${INP_MODE} \
     -lr 0.000001 \
     -ep 400 \
-    -bs 32 \
+    -bs 64 \
     -gpu ${GPU_IDS}
 
 # ------------------------------------------------------------------
@@ -78,7 +79,7 @@ python train.py \
     -ip ${INP_MODE} \
     -lr 0.000001 \
     -ep 400 \
-    -bs 32 \
+    -bs 64 \
     -gpu ${GPU_IDS}
 
 # ------------------------------------------------------------------
@@ -99,7 +100,7 @@ python train.py \
     -ip ${INP_MODE} \
     -lr 0.000001 \
     -ep 400 \
-    -bs 32 \
+    -bs 64 \
     -gpu ${GPU_IDS}
 
 # ------------------------------------------------------------------
@@ -120,7 +121,7 @@ python train.py \
     -ip ${INP_MODE} \
     -lr 0.000001 \
     -ep 400 \
-    -bs 32 \
+    -bs 64 \
     -gpu ${GPU_IDS}
 
 echo ""

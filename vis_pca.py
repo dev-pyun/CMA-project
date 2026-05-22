@@ -52,33 +52,74 @@ def load_global_stats(path: str) -> dict:
             'std':  d['std'].astype(np.float64)}
 
 
+def load_global_pca(path: str) -> dict:
+    """Load precomputed global PCA model from .npz (compute_global_stats.py --pca_only).
+
+    Returns dict with:
+        components              : (8, 8) float64 — eigenvectors (row = PC)
+        explained_variance_ratio: (8,)   float64
+        mean                    : (8,)   float64 — global band mean
+        std                     : (8,)   float64 — global band std
+    """
+    d = np.load(path)
+    return {
+        'components':               d['components'].astype(np.float64),
+        'explained_variance_ratio': d['explained_variance_ratio'].astype(np.float64),
+        'mean': d['mean'].astype(np.float64),
+        'std':  d['std'].astype(np.float64),
+    }
+
+
 def fit_pca(spectral: np.ndarray,
             standardize: bool = False,
-            global_stats: dict | None = None):
+            global_stats: dict | None = None,
+            global_pca: dict | None = None):
     """
-    Fit PCA(8) on (H, W, 8) uint16 spectral array.
+    Fit (or apply) PCA(8) on (H, W, 8) uint16 spectral array.
 
     Parameters
     ----------
-    standardize  : z-score each band before PCA (correlation-based PCA).
-    global_stats : {'mean': (8,), 'std': (8,)} from compute_global_stats.py.
-                   If given, uses fixed global mean/std so all scenes share the
-                   same normalised space (required for cross-scene consistency).
+    standardize  : z-score each band before PCA.
+    global_stats : {'mean', 'std'} from compute_global_stats.py.
+                   Uses fixed global mean/std for z-score.
                    If None with standardize=True, falls back to per-scene stats.
+    global_pca   : {'components', 'explained_variance_ratio', 'mean', 'std'}
+                   from compute_global_stats.py --pca_only.
+                   If given, SKIPS local PCA fit and applies pre-fitted global
+                   eigenvectors → all scenes share identical PC directions.
+                   Implies standardize=True with the stored global mean/std.
 
     Returns
     -------
-    pca_model : fitted sklearn PCA object (reusable for transfer)
+    pca_model : fitted sklearn PCA object (or None if global_pca used)
     pca_maps  : (H, W, 8) float32
     explained : (8,)      float64
-    scaler    : {'mean': (8,), 'std': (8,)} if standardize else None
+    scaler    : {'mean': (8,), 'std': (8,)} if standardize/global_pca else None
     """
     H, W, _ = spectral.shape
     f = spectral.astype(np.float32) / 10000.0
     X = f.reshape(-1, 8)
-    valid = np.isfinite(X).all(axis=1)
+    fill  = (spectral.reshape(-1, 8) == 0).any(axis=1)
+    valid = np.isfinite(X).all(axis=1) & ~fill
 
     X_fit  = X[valid].copy()
+    scores = np.full((H * W, 8), np.nan, dtype=np.float32)
+
+    # ── Case 1: global PCA — apply pre-fitted eigenvectors ─────────────
+    if global_pca is not None:
+        mean   = global_pca['mean'].astype(np.float32)
+        std    = global_pca['std'].astype(np.float32)
+        comps  = global_pca['components'].astype(np.float32)   # (8, 8)
+        evr    = global_pca['explained_variance_ratio']
+        scaler = {'mean': mean, 'std': std}
+
+        if valid.sum() > 0:
+            X_z = (X_fit - mean) / std          # global z-score
+            scores[valid] = (X_z @ comps.T)     # manual transform
+
+        return None, scores.reshape(H, W, 8), evr, scaler
+
+    # ── Case 2: per-scene PCA fit (with optional standardization) ──────
     scaler = None
     if standardize:
         if global_stats is not None:
@@ -92,7 +133,6 @@ def fit_pca(spectral: np.ndarray,
         scaler = {'mean': mean, 'std': std}
 
     pca = PCA(n_components=8, random_state=42)
-    scores = np.zeros((H * W, 8), dtype=np.float32)
     if valid.sum() > 8:
         scores[valid] = pca.fit_transform(X_fit).astype(np.float32)
 
@@ -101,10 +141,12 @@ def fit_pca(spectral: np.ndarray,
 
 def compute_pca(spectral: np.ndarray,
                 standardize: bool = False,
-                global_stats: dict | None = None):
+                global_stats: dict | None = None,
+                global_pca: dict | None = None):
     """Convenience wrapper — returns (pca_maps, explained) without model/scaler."""
     _, maps, explained, _ = fit_pca(spectral, standardize=standardize,
-                                    global_stats=global_stats)
+                                    global_stats=global_stats,
+                                    global_pca=global_pca)
     return maps, explained
 
 
@@ -203,7 +245,8 @@ def _scatter_data(spectral: np.ndarray, pca_maps: np.ndarray,
     lum = (0.2989 * f[:, :, 3] + 0.5870 * f[:, :, 2] + 0.1140 * f[:, :, 1])
     pc1, pc2 = pca_maps[:, :, 0].ravel(), pca_maps[:, :, 1].ravel()
     lum_flat = lum.ravel()
-    ok = np.isfinite(pc1) & np.isfinite(pc2) & np.isfinite(lum_flat)
+    fill_flat = (spectral.reshape(-1, 8) == 0).any(axis=1)
+    ok = np.isfinite(pc1) & np.isfinite(pc2) & np.isfinite(lum_flat) & ~fill_flat
     pc1, pc2, lum_flat = pc1[ok], pc2[ok], lum_flat[ok]
     if len(pc1) > max_pixels:
         idx = np.random.default_rng(42).choice(len(pc1), max_pixels, replace=False)
@@ -296,14 +339,19 @@ def main() -> None:
                         help='Also run z-score standardized PCA and save '
                              'comparison outputs (*_std suffix)')
     parser.add_argument('--global_stats', default=None,
-                        help='Path to global_spectral_stats.npz '
-                             '(from utils/compute_global_stats.py). '
-                             'If given, uses global mean/std for standardization '
-                             'instead of per-scene stats. Implies --standardize.')
+                        help='Path to global_spectral_stats.npz. '
+                             'Uses global mean/std for per-scene PCA z-score. '
+                             'Implies --standardize.')
+    parser.add_argument('--global_pca', default=None,
+                        help='Path to global_pca.npz (compute_global_stats --pca_only). '
+                             'All scenes share the same pre-fitted eigenvectors. '
+                             'Implies --standardize with global mean/std.')
     args = parser.parse_args()
 
     if args.global_stats:
-        args.standardize = True   # --global_stats implies standardization
+        args.standardize = True
+    if args.global_pca:
+        args.standardize = True
 
     random.seed(args.seed)
 
@@ -329,14 +377,16 @@ def main() -> None:
             spectral = load_scene(scene_dir)
             print(f'  Shape: {spectral.shape}')
 
-            gstats = load_global_stats(args.global_stats) \
-                     if args.global_stats else None
+            gstats  = load_global_stats(args.global_stats) if args.global_stats else None
+            gpca    = load_global_pca(args.global_pca)    if args.global_pca    else None
 
             def _run_pca(std: bool, suffix: str) -> None:
                 tag = f'  [{suffix}]' if suffix else ''
                 print(f'  Computing PCA(8){tag}...')
                 pca_maps, explained = compute_pca(
-                    spectral, standardize=std, global_stats=gstats if std else None)
+                    spectral, standardize=std,
+                    global_stats=gstats if std else None,
+                    global_pca=gpca if std else None)
                 print(f'  Explained variance: '
                       + ', '.join(f'PC{i+1}={v*100:.1f}%'
                                    for i, v in enumerate(explained))

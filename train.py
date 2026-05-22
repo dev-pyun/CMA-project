@@ -65,8 +65,8 @@ def get_args(argv=None):
                         help='Maximum training epochs (default: 400)')
 
     # Data
-    parser.add_argument('-bs', '--batch_size', type=int, default=32,
-                        help='Batch size (default: 32)')
+    parser.add_argument('-bs', '--batch_size', type=int, default=64,
+                        help='Batch size (default: 64)')
     parser.add_argument('--no_aug', dest='aug',
                         action='store_false', default=True,
                         help='Disable data augmentation')

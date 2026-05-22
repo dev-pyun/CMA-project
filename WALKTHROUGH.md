@@ -1439,3 +1439,169 @@ conda run -n remote python vis_pca_transfer.py \
     --out pca_vis/ \
     --global_stats src/data/global_spectral_stats.npz
 ```
+
+---
+
+## 2026-05-21 | Fill 픽셀 PCA 완전 제외 + compute_global_stats 속도 개선
+
+### 배경
+- PCA 분석 시 fill 픽셀(어느 밴드든 DN=0인 픽셀)이 fitting/transform 대상에 포함되어 결과가 왜곡됨
+- `compute_global_stats.py`가 전체 GeoTIFF 로드 후 numpy 슬라이싱으로 다운샘플 → 씬당 ~10초, 전체 15시간 소요
+
+### vis_pca.py 변경
+
+**`fit_pca()`**
+- `valid` 마스크에 fill 조건 추가: `fill = (spectral.reshape(-1,8) == 0).any(axis=1)`
+- `valid = np.isfinite(X).all(axis=1) & ~fill`
+- scores 초기값 `np.zeros` → `np.full(NaN)` — fill 위치가 NaN으로 표시됨
+  - imshow에서 colormap의 "bad color"(기본 white)로 렌더링 → fill 영역 시각 구분 가능
+
+**`_scatter_data()`**
+- `fill_flat = (spectral.reshape(-1, 8) == 0).any(axis=1)` 추가
+- `ok` 마스크에 `& ~fill_flat` 추가 → luminance scatter에서도 fill 픽셀 배제
+
+### vis_pca_transfer.py 변경
+
+**`apply_pca()`**
+- 동일하게 fill 마스크 추가 + scores 초기값 NaN으로 변경
+
+### utils/compute_global_stats.py 변경
+
+**`load_scene()` 속도 개선**
+- `from rasterio.enums import Resampling` 추가
+- 기존: 전체 H×W 로드 후 `spectral[::scale, ::scale]` 슬라이싱
+- 변경: `src.read(1, out_shape=(h_out, w_out), resampling=Resampling.average)` — rasterio가 직접 저해상도로 읽음
+- 속도: ~10초/씬 → ~0.5초/씬 (약 20배 향상), 전체 45분 예상
+
+```bash
+# 백그라운드 실행 (SSH 끊겨도 유지)
+nohup conda run --no-capture-output -n remote python -u utils/compute_global_stats.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --max_size 300 > logs/global_stats.log 2>&1 &
+
+# 진행도 확인
+tail -f logs/global_stats.log
+```
+
+---
+
+## 2026-05-21 | --init_cfmask에 shadow 초기화 추가
+
+### label_code/label_scene.py 변경
+
+`--init_cfmask` 플래그 사용 시 기존에는 cloud(CFMask class 1)만 label 4로 초기화됐으나,
+shadow(CFMask class 2)도 label 3으로 함께 초기화되도록 변경.
+
+```python
+# 변경 전
+_CFMASK_TO_LABEL = np.array([0, 4, 0, 0, 0] + [0]*250 + [255], dtype=np.uint8)
+
+# 변경 후
+_CFMASK_TO_LABEL = np.array([0, 4, 3, 0, 0] + [0]*250 + [255], dtype=np.uint8)
+#                                  ↑  ↑
+#                          cloud→4  shadow→3
+```
+
+### label_code/README.md 변경
+- `--init_cfmask` 설명에 shadow 초기화 내용 추가
+
+### src/README.md 변경
+- GitHub 인증 섹션: HTTPS/PAT 방식 → SSH 키 방식으로 업데이트
+
+---
+
+## 2026-05-22 | Global PCA fitting + PCA 피처를 모델 입력으로 추가
+
+### 배경
+- `vis_pca.py --global_stats`는 global z-score 후 **씬마다 PCA fit** → 씬별로 다른 eigenvector
+- 모든 씬에 동일한 PC 방향을 보장하려면 **한 번 fit한 global eigenvector**를 저장해야 함
+
+### utils/compute_global_stats.py 변경
+- `--pca_only` 플래그 추가: 기존 stats를 로드 후 IncrementalPCA만 수행
+- 전체 5,399 씬 픽셀을 global z-score 후 `IncrementalPCA(n_components=8).partial_fit()` 순회
+- 출력: `data/global_pca.npz` (components, explained_variance_ratio, mean, std)
+
+```bash
+# Pass 2 — global PCA fitting (~58분)
+conda run --no-capture-output -n remote python -u utils/compute_global_stats.py \
+    --pca_only > logs/global_pca.log 2>&1 &
+```
+
+결과 (global PCA explained variance):
+- PC1: ~96%, PC2: ~3.5%, PC3: ~0.6%, PC4~8: <0.1%
+
+### vis_pca.py 변경
+- `load_global_pca(path)` 함수 추가
+- `fit_pca(global_pca=...)` 파라미터 추가:
+  - 지정 시 per-scene fit 없이 저장된 eigenvector로 transform만 적용
+  - 모든 씬이 동일한 PC 방향 공유
+- `compute_pca(global_pca=...)` 파라미터 추가
+- `--global_pca PATH` CLI 플래그 추가
+
+### vis_pca_transfer.py 변경
+- `--global_pca PATH` CLI 플래그 추가
+- scene B도 global eigenvector로 transform
+
+```bash
+# 모든 씬이 동일한 eigenvector 사용
+conda run -n remote python vis_pca.py \
+    --root /earth00_home/immj/Landsat/USGS/OLI_TIRS/lv1/Weddell_Sea \
+    --n 3 --out output_vis/pca_global_fixed/ --seed 42 \
+    --global_pca data/global_pca.npz
+```
+
+### utils/dir_paths.py 변경
+- `GLOBAL_STATS_PATH`, `GLOBAL_PCA_PATH` 상수 추가
+
+### dataset/network_input.py 변경
+- `compute_global_pca(inp_img, n_pcs=3)` 함수 추가
+  - spectral channels 0-7 → global z-score → PCA 행렬 곱 → (B, n_pcs, H, W)
+  - global_pca.npz를 첫 호출 시 lazy load 후 캐싱
+- `inp_swirndsi_pca3()` 프리셋 추가: **B2-B7 + NDSI + PC1 + PC2 + PC3 (10채널)**
+- `_PRESET_MODES`에 `'swirndsi_pca3': 10` 등록
+
+### train.py 변경
+- default batch size: 32 → 64
+
+### 실행
+```bash
+# swirndsi_pca3 입력으로 stage 0 학습
+python train.py -e exp_swirndsi_pca3 -st 0 -ip swirndsi_pca3 -gpu 0
+```
+
+> **주의**: `swirndsi_pca3` 사용 시 `data/global_pca.npz`가 반드시 존재해야 함.
+
+### pipeline.sh 변경
+- 입력 모드 주석에 `swirndsi_pca3` 추가
+- 하드코딩된 `-bs 32` → `-bs 64` 로 변경 (전체 4 stage 동일)
+
+---
+
+## 2026-05-22 | GPU 대기 후 자동 학습 실행
+
+### 배경
+GPU 0, 1 모두 다른 학습 프로세스가 점유 중. GPU 1이 빌 때 자동으로 학습을 시작하도록 watcher 스크립트 실행.
+
+### 실행 중인 프로세스
+- GPU 0 (6GB, 99%): 본인 학습 중
+- GPU 1 (40GB): kimjw 학습 중
+
+### GPU 대기 watcher
+```bash
+# GPU 1이 빌 때까지 5분마다 체크 → 비면 pipeline 자동 실행
+nohup bash -c '
+while true; do
+    USED=$(nvidia-smi --id=1 --query-compute-apps=used_memory --format=csv,noheader | grep -v "^$" | wc -l)
+    if [ "$USED" -eq 0 ]; then
+        ./pipeline.sh exp_swirndsi_pca3 swirndsi_pca3 "1" >> logs/pipeline_swirndsi_pca3.log 2>&1
+        break
+    else
+        sleep 300
+    fi
+done
+' > logs/wait_and_run.log 2>&1 &
+```
+
+- SSH 끊겨도 nohup으로 유지됨
+- 진행 확인: `tail -f logs/wait_and_run.log`
+- 학습 시작 후: `tail -f logs/pipeline_swirndsi_pca3.log`

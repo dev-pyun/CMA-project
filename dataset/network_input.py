@@ -27,7 +27,63 @@ Input tensor channel layout (17 channels total):
     16: Sobel_Magnitude
 """
 
+import os
+import sys
+import numpy as np
 import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.dir_paths import GLOBAL_PCA_PATH
+
+# ── Global PCA transform (lazy-loaded) ────────────────────────────────
+# Loaded once on first use; stored as CPU tensors for zero-copy GPU transfer.
+_global_pca_cache = None
+
+def _load_global_pca() -> dict:
+    global _global_pca_cache
+    if _global_pca_cache is None:
+        if not os.path.exists(GLOBAL_PCA_PATH):
+            raise FileNotFoundError(
+                f'global_pca.npz not found at {GLOBAL_PCA_PATH}. '
+                'Run: python utils/compute_global_stats.py --pca_only')
+        d = np.load(GLOBAL_PCA_PATH)
+        _global_pca_cache = {
+            'mean':       torch.from_numpy(d['mean'].astype(np.float32)),        # (8,)
+            'std':        torch.from_numpy(d['std'].astype(np.float32)),         # (8,)
+            'components': torch.from_numpy(d['components'].astype(np.float32)),  # (8,8)
+        }
+    return _global_pca_cache
+
+
+def compute_global_pca(inp_img: torch.Tensor, n_pcs: int = 3) -> torch.Tensor:
+    """
+    Apply the pre-fitted global PCA to spectral bands (channels 0-7).
+
+    Steps:
+      1. Extract bands 0-7 (already / 10000 normalised)
+      2. Z-score with global mean / std
+      3. Project with global eigenvectors  →  (B, n_pcs, H, W)
+
+    Parameters
+    ----------
+    inp_img : (B, ≥8, H, W) float32
+    n_pcs   : number of PCs to return (default 3)
+
+    Returns
+    -------
+    (B, n_pcs, H, W) float32
+    """
+    pca  = _load_global_pca()
+    mean = pca['mean'].to(inp_img.device)   # (8,)
+    std  = pca['std'].to(inp_img.device)    # (8,)
+    comp = pca['components'].to(inp_img.device)  # (8, 8)
+
+    # (B, 8, H, W) → (B, H, W, 8) for broadcasting
+    x = inp_img[:, :8, :, :].permute(0, 2, 3, 1)          # (B, H, W, 8)
+    x = (x - mean) / std                                   # global z-score
+    pc = x @ comp[:n_pcs].T                                # (B, H, W, n_pcs)
+    return pc.permute(0, 3, 1, 2)                          # (B, n_pcs, H, W)
+
 
 # ── Channel index maps ─────────────────────────────────────────────────
 BAND_INDEX = {
@@ -226,6 +282,19 @@ def inp_all_derived(inp_img):
     return inp_img[:, :17, :, :]
 
 
+def inp_swirndsi_pca3(inp_img):
+    """SWIR + NDSI + global PCA PC1-3: B2–B7 + NDSI + PC1 + PC2 + PC3 (10 channels).
+
+    PC1-3 are computed on-the-fly using pre-fitted global eigenvectors from
+    data/global_pca.npz (all 5399 Weddell Sea scenes, global z-score PCA).
+    Requires global_pca.npz to be present — run utils/compute_global_stats.py --pca_only.
+    """
+    bands = inp_img[:, (1, 2, 3, 4, 5, 6), :, :]   # B2-B7 (6ch)
+    ndsi  = compute_NDSI(inp_img)                   # (B, 1, H, W)
+    pca3  = compute_global_pca(inp_img, n_pcs=3)    # (B, 3, H, W)
+    return torch.cat([bands, ndsi, pca3], dim=1)    # 10ch
+
+
 # ── Preset registry ────────────────────────────────────────────────────
 
 _PRESET_MODES = {
@@ -249,6 +318,8 @@ _PRESET_MODES = {
     'swir_sobel':       (inp_swir_sobel,       9),
     'swirndsi_sobel':   (inp_swirndsi_sobel,  10),
     'all_derived':      (inp_all_derived,     17),
+    # Global PCA features
+    'swirndsi_pca3':    (inp_swirndsi_pca3,  10),
 }
 
 
