@@ -34,10 +34,13 @@ EXP_DATA_PATH = os.path.join(
 
 def upload_models(api, repo_id: str) -> None:
     """
-    exp_data/ 아래 각 실험의 model_best.pth + log/ 폴더를 업로드.
+    exp_data/ 아래 각 실험의 model_best.pth + log/ 폴더를 upload_folder로 업로드.
+    파일 하나씩 commit하면 연결이 끊기는 문제가 있어 폴더 단위로 묶어서 올림.
     HF 경로 구조: {exp_name}/model/model_best.pth
                   {exp_name}/log/{파일들}
     """
+    import tempfile, shutil
+
     exp_root = Path(EXP_DATA_PATH)
     uploaded = 0
 
@@ -45,42 +48,45 @@ def upload_models(api, repo_id: str) -> None:
         if not exp_dir.is_dir():
             continue
 
-        # model_best.pth
         best_pth = exp_dir / 'model' / 'model_best.pth'
-        if best_pth.exists():
-            hf_path = f'{exp_dir.name}/model/model_best.pth'
-            print(f'  Uploading {hf_path} ({best_pth.stat().st_size / 1e6:.1f} MB)...')
-            api.upload_file(
-                path_or_fileobj=str(best_pth),
-                path_in_repo=hf_path,
+        log_dir = exp_dir / 'log'
+        has_model = best_pth.exists()
+        has_log = log_dir.exists()
+
+        if not has_model and not has_log:
+            continue
+
+        print(f'\n  Uploading {exp_dir.name}/ ...')
+
+        # 임시 디렉토리에 model_best.pth + log/ 복사 후 upload_folder
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            if has_model:
+                (tmp_path / 'model').mkdir()
+                shutil.copy2(best_pth, tmp_path / 'model' / 'model_best.pth')
+            if has_log:
+                shutil.copytree(log_dir, tmp_path / 'log')
+
+            api.upload_folder(
+                folder_path=str(tmp_path),
+                path_in_repo=exp_dir.name,
                 repo_id=repo_id,
                 repo_type='model',
             )
             uploaded += 1
 
-        # log/ 폴더
-        log_dir = exp_dir / 'log'
-        if log_dir.exists():
-            for log_file in log_dir.iterdir():
-                if log_file.is_file():
-                    hf_path = f'{exp_dir.name}/log/{log_file.name}'
-                    print(f'  Uploading {hf_path}...')
-                    api.upload_file(
-                        path_or_fileobj=str(log_file),
-                        path_in_repo=hf_path,
-                        repo_id=repo_id,
-                        repo_type='model',
-                    )
-                    uploaded += 1
-
-    print(f'\nDone. Uploaded {uploaded} files → {repo_id}')
+    print(f'\nDone. Uploaded {uploaded} experiments → {repo_id}')
 
 
 def upload_data(api, repo_id: str) -> None:
     """
     TRAIN_ZARR/ 와 VALIDATION_ZARR/ 전체를 데이터셋 repo에 업로드.
     stage_*.txt 파일은 제외 (재생성 가능).
+    upload_large_folder는 path_in_repo 미지원 → 부모 폴더(data/)에서
+    allow_patterns으로 각 split을 필터링해서 올림.
     """
+    data_root = Path(TRAIN_ZARR_PATH).parent  # data/
+
     for split, src_path in [('TRAIN_ZARR', TRAIN_ZARR_PATH),
                              ('VALIDATION_ZARR', VALID_ZARR_PATH)]:
         src = Path(src_path)
@@ -89,16 +95,12 @@ def upload_data(api, repo_id: str) -> None:
             continue
 
         print(f'\nUploading {split}/ ({src_path})...')
-        # stage_*.txt 제외하고 업로드
-        ignore_patterns = ['stage_*.txt']
-        api.upload_folder(
-            folder_path=str(src),
-            path_in_repo=split,
+        api.upload_large_folder(
+            folder_path=str(data_root),
             repo_id=repo_id,
             repo_type='dataset',
-            ignore_patterns=ignore_patterns,
-            multi_commits=True,        # 대용량 폴더는 여러 커밋으로 분할
-            multi_commits_verbose=True,
+            allow_patterns=[f'{split}/**'],
+            ignore_patterns=['**/stage_*.txt'],
         )
         print(f'  Done → {repo_id}/{split}')
 
