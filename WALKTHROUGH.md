@@ -1605,3 +1605,123 @@ done
 - SSH 끊겨도 nohup으로 유지됨
 - 진행 확인: `tail -f logs/wait_and_run.log`
 - 학습 시작 후: `tail -f logs/pipeline_swirndsi_pca3.log`
+
+---
+
+## 2026-05-27 | pipeline.sh conda 환경 문제 수정
+
+### 문제
+`pipeline.sh` 내부에서 `conda activate remote`를 사용하고 있었으나, non-interactive 셸(nohup, cron 등)에서는 conda activate가 동작하지 않아 시스템 python으로 실행됨.
+
+### 수정: `pipeline.sh`
+- `conda activate remote` 제거
+- `CONDA_RUN="conda run -n remote"` 변수 선언
+- 모든 `python ...` 호출 → `${CONDA_RUN} python ...` 으로 변경
+
+```bash
+# 변경 전
+conda activate remote
+python train.py ...
+
+# 변경 후
+CONDA_RUN="conda run -n remote"
+${CONDA_RUN} python train.py ...
+```
+
+---
+
+## 2026-05-27 | label_code — --init_cfmask cloud shadow 추가
+
+### 문제
+`--init_cfmask` 플래그 사용 시 cloud만 미리 그려지고 cloud shadow는 그려지지 않았음.
+
+### 수정: `label_code/label_scene.py`
+```python
+# 변경 전
+_CFMASK_TO_LABEL = np.array([0, 4, 0, 0, 0] + [0]*250 + [255], dtype=np.uint8)
+
+# 변경 후
+_CFMASK_TO_LABEL = np.array([0, 4, 3, 0, 0] + [0]*250 + [255], dtype=np.uint8)
+# cfmask=2 (shadow) → label 3 (shadow)
+```
+
+---
+
+## 2026-05-27 | Hugging Face Hub 업로드 구축
+
+### 배경
+실험 결과물(모델 + 로그)과 패치 데이터(TRAIN_ZARR, VALIDATION_ZARR)를 Hugging Face Hub에 백업/공유하기 위한 업로드 파이프라인 구축.
+
+### 신규 파일: `utils/upload_to_hf.py`
+- `upload_models(api, repo_id)`: `exp_data/` 아래 각 실험의 `model_best.pth` + `log/` 업로드
+  - 초기: `upload_file()` per-file 방식 → CLOSE-WAIT hang 반복 문제 발생
+  - 변경: `upload_folder()` 방식으로 임시 디렉토리 경유 실험별 폴더 업로드
+- `upload_data(api, repo_id)`: TRAIN_ZARR + VALIDATION_ZARR 데이터셋 업로드
+  - 초기: `upload_folder()` → 파일 수 초과(231,482개) 경고 + hang
+  - 변경: `upload_large_folder()` 방식으로 청크 단위 업로드 + 중단 시 이어받기 지원
+  - `path_in_repo` 미지원 문제: 부모 디렉토리(`data/`) 기준 + `allow_patterns`으로 해결
+- CLI: `--mode [models|data]`, `--repo`, `--token`
+
+### 신규 파일: `utils/upload_models.sh`
+- 70–125MB 대형 `.pth` 파일에서 `upload_folder` 방식도 CLOSE-WAIT hang 반복
+- `hf upload` CLI로 파일 하나씩 개별 업로드하는 방식으로 우회
+- 각 파일 성공/실패 시 `✓` / `✗` 출력
+
+```bash
+# 모델 개별 업로드
+nohup conda run --no-capture-output -n remote bash utils/upload_models.sh dev-pyun/CMA-models \
+    > logs/hf_models_upload.log 2>&1 &
+
+# 패치 데이터 업로드 (이어받기 지원)
+nohup conda run --no-capture-output -n remote python -u utils/upload_to_hf.py \
+    --mode data --repo dev-pyun/CMA-patches > logs/hf_upload.log 2>&1 &
+```
+
+### global_pca.npz, global_spectral_stats.npz 업로드
+```bash
+conda run -n remote python -c "
+from huggingface_hub import HfApi
+api = HfApi()
+for fname in ['global_spectral_stats.npz', 'global_pca.npz']:
+    api.upload_file(
+        path_or_fileobj=f'data/{fname}',
+        path_in_repo=fname,
+        repo_id='dev-pyun/CMA-patches',
+        repo_type='dataset',
+    )
+    print(f'Uploaded {fname}')
+"
+```
+
+### conda 환경 export
+```bash
+conda env export -n remote > requirements_remote.yaml
+```
+
+### HF 업로드 관련 주의사항
+- `nohup conda run` 시 반드시 `--no-capture-output -u` 플래그 사용 → 없으면 conda가 출력을 버퍼링해 로그 파일에 아무것도 안 찍힘
+- `huggingface-cli` deprecated → `hf` 명령어 사용
+- ZARR 데이터는 파일 수가 231,482개로 HF 권장(100,000개) 초과 — 경고만 출력되고 업로드는 진행됨
+
+---
+
+## 2026-05-27 | 모든 실행 nohup 정책 수립
+
+### 배경
+SSH 세션이 끊기면 실행 중인 프로세스가 SIGHUP을 받아 종료됨. 학습/업로드 등 장시간 작업이 중단되는 문제.
+
+### 정책
+앞으로 **모든 실행**은 아래 패턴 사용:
+
+```bash
+# Python 스크립트
+nohup conda run --no-capture-output -n remote python -u script.py ... > logs/xxx.log 2>&1 &
+
+# Bash 스크립트
+nohup conda run --no-capture-output -n remote bash script.sh ... > logs/xxx.log 2>&1 &
+```
+
+- `nohup`: SIGHUP 무시 → SSH 끊겨도 프로세스 유지
+- `--no-capture-output`: conda가 subprocess 출력을 캡처하지 않고 즉시 흘려줌
+- `-u`: Python unbuffered 출력 → 로그 파일에 실시간 반영
+- `> logs/xxx.log 2>&1`: stdout + stderr 모두 로그 파일로 리다이렉트
