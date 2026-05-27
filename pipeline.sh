@@ -39,6 +39,8 @@ GPU_IDS=${3:-"0 1"}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+CONDA_RUN="conda run -n remote"
+
 echo "=============================================="
 echo "Self-Training Pipeline: ${EXP_NAME}"
 echo "Input Mode: ${INP_MODE}"
@@ -51,7 +53,7 @@ echo "=============================================="
 # ------------------------------------------------------------------
 echo ""
 echo ">>> STAGE 0: Training on QA_PIXEL labels..."
-python train.py \
+${CONDA_RUN} python train.py \
     -e ${EXP_NAME}_stage0 \
     -st 0 \
     -ip ${INP_MODE} \
@@ -66,14 +68,14 @@ python train.py \
 # ------------------------------------------------------------------
 echo ""
 echo ">>> STAGE 1: Generating pseudo-labels from stage 0..."
-python label_generation.py \
+${CONDA_RUN} python label_generation.py \
     -e ${EXP_NAME}_stage0 \
     -st 1 \
     -ip ${INP_MODE} \
     -gpu ${GPU_IDS}
 
 echo ">>> STAGE 1: Training..."
-python train.py \
+${CONDA_RUN} python train.py \
     -e ${EXP_NAME}_stage1 \
     -st 1 \
     -ip ${INP_MODE} \
@@ -87,14 +89,14 @@ python train.py \
 # ------------------------------------------------------------------
 echo ""
 echo ">>> STAGE 2: Generating pseudo-labels from stage 1..."
-python label_generation.py \
+${CONDA_RUN} python label_generation.py \
     -e ${EXP_NAME}_stage1 \
     -st 2 \
     -ip ${INP_MODE} \
     -gpu ${GPU_IDS}
 
 echo ">>> STAGE 2: Training..."
-python train.py \
+${CONDA_RUN} python train.py \
     -e ${EXP_NAME}_stage2 \
     -st 2 \
     -ip ${INP_MODE} \
@@ -108,14 +110,14 @@ python train.py \
 # ------------------------------------------------------------------
 echo ""
 echo ">>> STAGE 3: Generating pseudo-labels from stage 2..."
-python label_generation.py \
+${CONDA_RUN} python label_generation.py \
     -e ${EXP_NAME}_stage2 \
     -st 3 \
     -ip ${INP_MODE} \
     -gpu ${GPU_IDS}
 
 echo ">>> STAGE 3: Training..."
-python train.py \
+${CONDA_RUN} python train.py \
     -e ${EXP_NAME}_stage3 \
     -st 3 \
     -ip ${INP_MODE} \
