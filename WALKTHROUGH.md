@@ -1725,3 +1725,33 @@ nohup conda run --no-capture-output -n remote bash script.sh ... > logs/xxx.log 
 - `--no-capture-output`: conda가 subprocess 출력을 캡처하지 않고 즉시 흘려줌
 - `-u`: Python unbuffered 출력 → 로그 파일에 실시간 반영
 - `> logs/xxx.log 2>&1`: stdout + stderr 모두 로그 파일로 리다이렉트
+
+---
+
+## 2026-05-28 | DataLoader num_workers 제한 (16 → 8)
+
+### 배경
+서버 CPU 24개 중 학습 시 DataLoader가 `num_workers=16`으로 동작해 CPU 사용률이 과도하게 높다는 제보.
+
+### 원인 분석
+DataLoader worker 수를 줄여도 CPU 사용이 높았던 진짜 원인:
+
+**Blosc란?**
+Blosc는 zarr가 배열 청크를 디스크에 저장할 때 사용하는 **고속 압축 라이브러리**다.
+zlib/gzip보다 훨씬 빠른 압축/해제 속도를 위해 내부적으로 **자체 멀티스레드 풀**을 가지고 있으며,
+기본적으로 사용 가능한 CPU 코어 수만큼 스레드를 자동 생성한다.
+패치를 읽을 때마다(`__getitem__`) zarr가 blosc를 호출해 압축을 해제하므로,
+DataLoader worker 안에서 매 배치마다 blosc 스레드들이 활성화된다.
+
+문제: zarr 패치 압축 해제에 쓰이는 **blosc가 워커당 독립적인 스레드풀**을 가짐.
+수정 전: DataLoader 8 워커 × blosc 8스레드 = 64 OS스레드가 CPU 24개를 경쟁.
+
+### 수정
+- `dataset/patch_dataset.py` — `WORKERS = 16 → 6`
+- `dataset/patch_dataset.py` — `_worker_init_fn` 추가: 각 워커에서 `numcodecs.blosc.set_nthreads(1)` 호출
+- `dataset/patch_dataset.py` — DataLoader에 `worker_init_fn=_worker_init_fn` 전달
+- `train.py` — `torch.set_num_threads(6)` (PyTorch 연산 스레드도 6으로 제한)
+
+### 효과
+- 실질 CPU 사용: 6 워커 × 1 blosc스레드 = **최대 6 CPU**
+- 이전 설정 대비 CPU 사용 ~10배 감소 예상

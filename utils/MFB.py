@@ -18,9 +18,16 @@ logger = logging.getLogger(__name__)
 NUM_CLASSES = 3  # 3-class: 0=no-cloud, 1=cloud, 2=shadow
 
 
-def get_MFB_weights(dataloader, num_classes=NUM_CLASSES):
+def get_MFB_weights(dataloader, num_classes=NUM_CLASSES, max_weight=10.0):
     """
     Iterate over the dataloader once and compute MFB weights.
+
+    Parameters
+    ----------
+    max_weight : float
+        Upper bound for any single class weight. Prevents weight explosion
+        when a class has zero or near-zero frequency (e.g. shadow absent
+        from QA_PIXEL labels in polar scenes).
 
     Returns
     -------
@@ -42,7 +49,7 @@ def get_MFB_weights(dataloader, num_classes=NUM_CLASSES):
     freq[freq == 0] = 1e-10  # avoid division by zero
     median_freq = np.median(freq[freq > 1e-10])
 
-    weights = median_freq / freq
+    weights = np.clip(median_freq / freq, 0, max_weight)
     logger.info(f'Class frequencies: {freq}')
     logger.info(f'MFB weights:       {weights}')
     return weights.astype(np.float32)

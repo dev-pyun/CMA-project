@@ -26,6 +26,7 @@ import logging
 import os
 import random
 
+import numcodecs
 import numpy as np
 import torch
 import zarr
@@ -37,7 +38,13 @@ from dataset.transforms import VerticalFlip, HorizontalFlip, Rotate90, CutOut, Z
 logger = logging.getLogger(__name__)
 np.set_printoptions(precision=4, suppress=True)
 
-WORKERS = 16
+WORKERS = 6
+
+
+def _worker_init_fn(worker_id):
+    # Each DataLoader worker has its own blosc thread pool.
+    # Limit to 1 so WORKERS × blosc threads doesn't blow past the CPU budget.
+    numcodecs.blosc.set_nthreads(1)
 
 N_SPECTRAL_BANDS = 8   # spectral channels in zarr 'spectral' array
 N_DERIVED        = 9   # rgb(3) + hsv(3) + sobel(3)
@@ -169,6 +176,7 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=WORKERS,
+        worker_init_fn=_worker_init_fn,
     )
     return dataloader
 
