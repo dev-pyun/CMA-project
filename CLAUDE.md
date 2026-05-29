@@ -85,3 +85,4 @@ data[:, :, 9]    → Pseudo-label (label_generation.py가 추가)
 - 코드 실행 결과가 예상과 다를때, 코드 실행 과정과 예상 결과를 나에게 보여줘.
 - 앞으로 모든 진행사항과 수정사항이 생길때마다 반드시 그 진행사항 및 수정사항을 /home/pyuncb/src/WALKTHROUGH.md에 기록해줘. 
 - 모든 코드 실행은 ssh가 끊겨도 백그라운드에서 실행되도록 해줘. (nohup / tmux 등 사용)
+- 원본 논문은 src/Self-trained model for cloud, shadow and snow detection in sentinel-2 images of snow- and ice- covered regions.pdf에 있으니 이걸 참고해

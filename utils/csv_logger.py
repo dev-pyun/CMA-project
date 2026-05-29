@@ -22,9 +22,8 @@ def make_overall_statistics_csv(train_metrics, valid_metrics,
     fieldnames = ['epoch',
                   'train_loss', 'train_acc',
                   'val_loss', 'val_mIoU', 'val_OA']
-    # Add per-class IoU fields
-    for c in sorted(class_metrics_dict.keys()):
-        fieldnames.append(f'class_{c}_IoU')
+    for name in class_metrics_dict.keys():
+        fieldnames.append(f'{name}_IoU')
 
     row = {
         'epoch': epoch + 1,
@@ -34,8 +33,8 @@ def make_overall_statistics_csv(train_metrics, valid_metrics,
         'val_mIoU': f"{valid_metrics['mIoU']:.6f}",
         'val_OA': f"{valid_metrics['OA']:.6f}",
     }
-    for c, iou in class_metrics_dict.items():
-        row[f'class_{c}_IoU'] = f'{iou:.6f}'
+    for name, iou in class_metrics_dict.items():
+        row[f'{name}_IoU'] = f'{iou:.6f}'
 
     with open(csv_path, 'a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

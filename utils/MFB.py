@@ -2,10 +2,11 @@
 Median Frequency Balancing (MFB) for computing class weights.
 
 The weight for each class is:
-    w_c = median(freq) / freq_c
+    w_c = sqrt(median(freq) / freq_c)
 
-where freq_c is the relative frequency of class c across the training set.
-This gives lower weight to common classes and higher weight to rare ones.
+Square-root variant of the original MFB (Nambiar et al. 2022).
+sqrt compresses extreme weights for very rare classes (e.g. shadow ~1.8%)
+without requiring an arbitrary cap.
 """
 
 import logging
@@ -18,16 +19,9 @@ logger = logging.getLogger(__name__)
 NUM_CLASSES = 3  # 3-class: 0=no-cloud, 1=cloud, 2=shadow
 
 
-def get_MFB_weights(dataloader, num_classes=NUM_CLASSES, max_weight=10.0):
+def get_MFB_weights(dataloader, num_classes=NUM_CLASSES):
     """
-    Iterate over the dataloader once and compute MFB weights.
-
-    Parameters
-    ----------
-    max_weight : float
-        Upper bound for any single class weight. Prevents weight explosion
-        when a class has zero or near-zero frequency (e.g. shadow absent
-        from QA_PIXEL labels in polar scenes).
+    Iterate over the dataloader once and compute sqrt-MFB weights.
 
     Returns
     -------
@@ -49,9 +43,9 @@ def get_MFB_weights(dataloader, num_classes=NUM_CLASSES, max_weight=10.0):
     freq[freq == 0] = 1e-10  # avoid division by zero
     median_freq = np.median(freq[freq > 1e-10])
 
-    weights = np.clip(median_freq / freq, 0, max_weight)
+    weights = np.sqrt(median_freq / freq)
     logger.info(f'Class frequencies: {freq}')
-    logger.info(f'MFB weights:       {weights}')
+    logger.info(f'MFB weights (sqrt): {weights}')
     return weights.astype(np.float32)
 
 

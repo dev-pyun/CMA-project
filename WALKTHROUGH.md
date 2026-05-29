@@ -1728,6 +1728,26 @@ nohup conda run --no-capture-output -n remote bash script.sh ... > logs/xxx.log 
 
 ---
 
+## 2026-05-29 | 학습 로그에 per-class IoU 추가
+
+### 변경 이유
+기존 로그에는 mIoU만 출력되어 no-cloud / cloud / shadow 각 클래스의 성능을 epoch마다 확인할 수 없었음.
+
+### 수정 파일
+
+**`utils/metrics.py`**:
+- `CLASS_NAMES = ['nocloud', 'cloud', 'shadow']` 상수 추가
+- `class_iou` dict 키를 정수(0,1,2) → 클래스 이름 문자열로 변경
+- `logger.info` 출력에 per-class IoU 추가:
+  ```
+  Val Loss: ...  mIoU: ...  OA: ...  [nocloud: 0.xxxx  cloud: 0.xxxx  shadow: 0.xxxx]
+  ```
+
+**`utils/csv_logger.py`**:
+- CSV 컬럼명 `class_0_IoU`, `class_1_IoU`, `class_2_IoU` → `nocloud_IoU`, `cloud_IoU`, `shadow_IoU`
+
+---
+
 ## 2026-05-28 | DataLoader num_workers 제한 (16 → 8)
 
 ### 배경
@@ -1755,3 +1775,29 @@ DataLoader worker 안에서 매 배치마다 blosc 스레드들이 활성화된�
 ### 효과
 - 실질 CPU 사용: 6 워커 × 1 blosc스레드 = **최대 6 CPU**
 - 이전 설정 대비 CPU 사용 ~10배 감소 예상
+
+---
+
+## 2026-05-29 | MFB → sqrt-MFB 변경
+
+### 배경
+- 원본 논문(Nambiar et al. 2022)은 표준 MFB 사용 (cap/sqrt 없음)
+- 논문의 shadow 비율 5.51% vs 우리 데이터 1.82% — 더 희소해 weight 폭발 위험
+- 이전: cap(max_weight=10) 적용 → 임의의 상한값 문제
+- sqrt MFB: 자연스럽게 weight를 압축, 임의 파라미터 불필요
+
+### 수정: `utils/MFB.py`
+```python
+# 변경 전
+weights = np.clip(median_freq / freq, 0, max_weight)
+
+# 변경 후
+weights = np.sqrt(median_freq / freq)
+```
+
+### 효과 (현재 데이터 기준: clear=68%, cloud=30%, shadow=1.8%)
+| 방식 | clear | cloud | shadow |
+|------|-------|-------|--------|
+| 표준 MFB | 0.44 | 1.0 | 16.7 |
+| cap(10) MFB | 0.44 | 1.0 | 10.0 |
+| sqrt MFB | 0.66 | 1.0 | 4.1 |

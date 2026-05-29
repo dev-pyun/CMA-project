@@ -14,6 +14,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 NUM_CLASSES = 6
+CLASS_NAMES = ['nocloud', 'cloud', 'shadow']
 
 
 class Metrics:
@@ -46,11 +47,12 @@ class Metrics:
         cm = self.val_confusion_matrix.cpu().numpy()
         class_iou = {}
         for c in range(self.num_classes):
+            name = CLASS_NAMES[c] if c < len(CLASS_NAMES) else str(c)
             tp = cm[c, c]
             fp = cm[:, c].sum() - tp
             fn = cm[c, :].sum() - tp
             denom = tp + fp + fn
-            class_iou[c] = tp / denom if denom > 0 else 0.0
+            class_iou[name] = tp / denom if denom > 0 else 0.0
 
         miou = np.mean(list(class_iou.values()))
         self.val_mIoU_history.append(miou)
@@ -60,10 +62,13 @@ class Metrics:
         train_metrics = {'loss': train_loss, 'acc': train_acc}
         valid_metrics = {'loss': val_loss, 'mIoU': miou, 'OA': overall_acc}
 
+        per_class_str = '  '.join(
+            f'{name}: {iou:.4f}' for name, iou in class_iou.items())
         logger.info(
             f'Epoch {epoch + 1}  '
             f'Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f}  |  '
-            f'Val Loss: {val_loss:.4f}  mIoU: {miou:.4f}  OA: {overall_acc:.4f}'
+            f'Val Loss: {val_loss:.4f}  mIoU: {miou:.4f}  OA: {overall_acc:.4f}  '
+            f'[{per_class_str}]'
         )
 
         return train_metrics, valid_metrics, class_iou
