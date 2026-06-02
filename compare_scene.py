@@ -134,6 +134,21 @@ def load_scene_rgb(spectral: np.ndarray) -> np.ndarray:
 
 # ── 모델 추론 (씬 전체 패치 스캔) ─────────────────────────────────────
 
+def _detect_num_classes(exp_name: str) -> int:
+    """체크포인트의 conv_final.weight shape에서 num_classes 자동 감지."""
+    import torch as _torch
+    from utils.dir_paths import EXP_DATA_PATH as _EDP
+    pth = os.path.join(_EDP, exp_name, 'model', 'model_best.pth')
+    if not os.path.exists(pth):
+        return 3
+    ckpt = _torch.load(pth, map_location='cpu', weights_only=False)
+    state = ckpt.get('model_state_dict', {})
+    for key in ('module.conv_final.weight', 'conv_final.weight'):
+        if key in state:
+            return state[key].shape[0]
+    return 3
+
+
 def run_scene_inference(spectral: np.ndarray, exp_name: str,
                         gpu_id: list,
                         stage: int = 3,
@@ -143,9 +158,12 @@ def run_scene_inference(spectral: np.ndarray, exp_name: str,
     반환: (H, W) uint8  — 0=no-cloud, 1=cloud, 255=처리 안 된 영역
     """
     import argparse as _ap
+    num_classes = _detect_num_classes(exp_name)
+    print(f"  num_classes: {num_classes}")
     args = _ap.Namespace(
         exp_name=exp_name, stage=stage, full=False, dropout=True,
         learning_rate=1e-6, inp_mode=inp_mode, bands=None, indices=None,
+        num_classes=num_classes,
     )
     exp   = Experiment(args, mode='test')
     model = Model(exp, gpu_id=gpu_id)
@@ -232,7 +250,7 @@ def remap_gt(labels_raw: np.ndarray) -> np.ndarray:
 def _save_panel(rgb_v: np.ndarray, mask: np.ndarray,
                 title: str, out_path: str, suptitle: str):
     """단일 패널 이미지를 파일로 저장."""
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10), dpi=120)
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10), dpi=300)
     legend_patches = [
         mpatches.Patch(color=COLORS[1],   label='Cloud'),
         mpatches.Patch(color=COLORS[2],   label='Cloud Shadow'),

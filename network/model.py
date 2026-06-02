@@ -50,6 +50,7 @@ class Model:
 
         self.inp_func = get_inp_func(self.exp.inp_mode)
         n_inp_channels = get_inp_channels(self.exp.inp_mode)
+        num_classes = getattr(self.exp, 'num_classes', NUM_CLASSES)
 
         if experiment.full:
             depth = DEPTH_OPTIONS[-1]
@@ -58,10 +59,11 @@ class Model:
             start_filters = FILTER_OPTIONS[self.exp.stage]
             depth = DEPTH_OPTIONS[self.exp.stage]
 
-        logger.info(f'Stage {self.exp.stage}: depth={depth}, filters={start_filters}')
+        logger.info(f'Stage {self.exp.stage}: depth={depth}, filters={start_filters}, '
+                    f'num_classes={num_classes}')
 
         # Build network
-        self.network = UNet(num_classes=NUM_CLASSES,
+        self.network = UNet(num_classes=num_classes,
                             in_channels=n_inp_channels,
                             depth=depth,
                             start_filts=start_filters,
@@ -75,7 +77,7 @@ class Model:
                 self.network.parameters(),
                 lr=self.exp.lr,
                 weight_decay=1e-5)
-            self.metrics = Metrics(self.device, num_classes=NUM_CLASSES)
+            self.metrics = Metrics(self.device, num_classes=num_classes)
 
             # Early stopping
             self.patience_counter = 0
@@ -86,7 +88,7 @@ class Model:
             trained_model = self.exp.get_trained_model_info()
             self.network.load_state_dict(trained_model['model_state_dict'])
 
-            self.metrics = Metrics(self.device, num_classes=NUM_CLASSES)
+            self.metrics = Metrics(self.device, num_classes=num_classes)
 
             if experiment.mode == 'label_gen':
                 self.stage_freq_data = []
@@ -101,17 +103,19 @@ class Model:
 
     def get_loss(self, output, labels, mode, fmask=None):
         labels = labels.to(self.device)
+        num_classes = getattr(self.exp, 'num_classes', NUM_CLASSES)
         if self.exp.weights is not None:
             w = torch.from_numpy(self.exp.weights).float().to(self.device)
         else:
             # test/predict mode: use uniform weights (no MFB available)
-            w = torch.ones(NUM_CLASSES, dtype=torch.float32).to(self.device)
+            w = torch.ones(num_classes, dtype=torch.float32).to(self.device)
         loss = F.cross_entropy(output, labels, w, ignore_index=NODATA_LABEL)
 
         predicted_label = self.encode_label(output)
         if mode != 'train':
             self.metrics.val_confusion_matrix += calculate_confusion_matrix(
-                predicted_label, labels, mode, num_classes=NUM_CLASSES)
+                predicted_label, labels, mode,
+                num_classes=getattr(self.exp, 'num_classes', NUM_CLASSES))
         else:
             acc = calculate_accuracy(predicted_label, labels, mode).detach()
             self.metrics.add_step_info(mode, loss.detach(), acc)

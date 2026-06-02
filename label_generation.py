@@ -47,6 +47,8 @@ def get_args(argv=None):
                         help='Index names for custom mode')
     parser.add_argument('-gpu', '--gpu_id', type=int, nargs='+', default=[0],
                         help='GPU IDs')
+    parser.add_argument('--num_classes', type=int, default=3,
+                        help='Number of output classes (must match training)')
     return parser.parse_args(argv)
 
 
@@ -58,7 +60,8 @@ if __name__ == '__main__':
     test_loader = setup_data(
         args.batch_size, 'label_gen',
         stage=args.stage,
-        path=TRAIN_PATH)
+        path=TRAIN_PATH,
+        num_classes=args.num_classes)
 
     # Initialize model for evaluation
     model = Model(exp, gpu_id=args.gpu_id)

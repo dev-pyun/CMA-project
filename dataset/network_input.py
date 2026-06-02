@@ -282,6 +282,15 @@ def inp_all_derived(inp_img):
     return inp_img[:, :17, :, :]
 
 
+def inp_swirndsindwi_pca3(inp_img):
+    """SWIR + NDSI + NDWI + global PCA PC1-3: B2–B7 + NDSI + NDWI + PC1-3 (11 channels)."""
+    bands = inp_img[:, (1, 2, 3, 4, 5, 6), :, :]   # B2-B7 (6ch)
+    ndsi  = compute_NDSI(inp_img)                   # (B, 1, H, W)
+    ndwi  = compute_NDWI(inp_img)                   # (B, 1, H, W)
+    pca3  = compute_global_pca(inp_img, n_pcs=3)    # (B, 3, H, W)
+    return torch.cat([bands, ndsi, ndwi, pca3], dim=1)  # 11ch
+
+
 def inp_swirndsi_pca3(inp_img):
     """SWIR + NDSI + global PCA PC1-3: B2–B7 + NDSI + PC1 + PC2 + PC3 (10 channels).
 
@@ -293,6 +302,19 @@ def inp_swirndsi_pca3(inp_img):
     ndsi  = compute_NDSI(inp_img)                   # (B, 1, H, W)
     pca3  = compute_global_pca(inp_img, n_pcs=3)    # (B, 3, H, W)
     return torch.cat([bands, ndsi, pca3], dim=1)    # 10ch
+
+
+def inp_ndsi679(inp_img):
+    """NDSI(B5,B6) + B6 + B7 + B9 (4 channels). 2-class cloud detection mode.
+
+    NDSI = (B5 - B6) / (B5 + B6)  (NIR - SWIR1 ratio; highlights snow/cloud contrast)
+    B6  = SWIR1  (cloud bright, snow dark)
+    B7  = SWIR2  (cloud bright, snow/ice dark)
+    B9  = Cirrus (thin/cirrus cloud detection)
+    """
+    ndsi  = compute_NDSI(inp_img)                   # (B5-B6)/(B5+B6), (B,1,H,W)
+    bands = inp_img[:, (5, 6, 7), :, :]             # B6, B7, B9
+    return torch.cat([ndsi, bands], dim=1)           # 4ch
 
 
 # ── Preset registry ────────────────────────────────────────────────────
@@ -319,7 +341,10 @@ _PRESET_MODES = {
     'swirndsi_sobel':   (inp_swirndsi_sobel,  10),
     'all_derived':      (inp_all_derived,     17),
     # Global PCA features
-    'swirndsi_pca3':    (inp_swirndsi_pca3,  10),
+    'swirndsi_pca3':      (inp_swirndsi_pca3,      10),
+    'swirndsindwi_pca3':  (inp_swirndsindwi_pca3,  11),
+    # 2-class cloud-only mode (shadow ignored)
+    'ndsi679':            (inp_ndsi679,              4),
 }
 
 

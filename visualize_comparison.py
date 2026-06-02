@@ -95,7 +95,7 @@ def sample_by_gini(patch_dirs: list[str], n: int,
     필터 통과 패치가 n보다 적으면 전부 반환.
     """
     qualified = [p for p in patch_dirs if compute_gini(p) >= min_gini]
-    print(f"  Gini ≥ {min_gini:.2f}: {len(qualified)}/{len(patch_dirs)} 패치 통과")
+    print(f"  Gini ≥ {min_gini:.2f}: {len(qualified)}/{len(patch_dirs)} 패치 통과", file=sys.stderr)
     return random.sample(qualified, min(n, len(qualified)))
 
 
@@ -185,12 +185,13 @@ def load_fmask(scene_dir: Path, row: int, col: int) -> np.ndarray:
 
 # ── 모델 추론 ──────────────────────────────────────────────────────────
 
-def run_inference(patch_path: str, exp_name: str, gpu_id: list) -> np.ndarray:
+def run_inference(patch_path: str, exp_name: str, gpu_id: list,
+                  inp_mode: str = 'swirndsi') -> np.ndarray:
     """패치 한 개에 대해 모델 예측을 실행. (256, 256) uint8 반환."""
     import argparse as _ap
     args = _ap.Namespace(
         exp_name=exp_name, stage=3, full=False, dropout=True,
-        learning_rate=1e-6, inp_mode='swirndsi', bands=None, indices=None,
+        learning_rate=1e-6, inp_mode=inp_mode, bands=None, indices=None,
     )
     exp   = Experiment(args, mode='test')
     model = Model(exp, gpu_id=gpu_id)
@@ -202,8 +203,8 @@ def run_inference(patch_path: str, exp_name: str, gpu_id: list) -> np.ndarray:
     hsv      = store['hsv'][:]
     sobel    = store['sobel'][:]
 
+    # zarr stores 258×258 (256 + 1px real border each side) — no extra padding needed
     full = np.concatenate([spectral, rgb_arr, hsv, sobel], axis=-1)
-    full = np.pad(full, ((1, 1), (1, 1), (0, 0)), 'constant', constant_values=0)
     full = np.transpose(full, (2, 0, 1))
     inp  = torch.from_numpy(full[None]).float()
 
@@ -213,7 +214,7 @@ def run_inference(patch_path: str, exp_name: str, gpu_id: list) -> np.ndarray:
         out  = model.network(inp_func(inp.to(device)))
         pred = torch.argmax(F.softmax(out, dim=1), dim=1)[0].cpu().numpy()
 
-    return pred[1:-1, 1:-1].astype(np.uint8)   # 패딩 제거
+    return pred[1:-1, 1:-1].astype(np.uint8)   # border 제거 → (256, 256)
 
 
 # ── 씬 오버뷰 + 패치 위치 표시 ────────────────────────────────────────
@@ -286,7 +287,8 @@ def overlay_mask(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 def visualize_patch(patch_path: str, exp_name: str, label_dir: str,
                     gpu_id: list, out_dir: str,
-                    scene_dir_override: str = None):
+                    scene_dir_override: str = None,
+                    inp_mode: str = 'swirndsi'):
 
     scene_id, patch_idx = parse_patch_name(patch_path)
     print(f"[{scene_id}  PATCH{patch_idx}]")
@@ -308,7 +310,7 @@ def visualize_patch(patch_path: str, exp_name: str, label_dir: str,
 
     # ── Fmask, 모델 예측, GT 로드 ──
     fmask = load_fmask(scene_dir, row, col)
-    pred  = run_inference(patch_path, exp_name, gpu_id)
+    pred  = run_inference(patch_path, exp_name, gpu_id, inp_mode=inp_mode)
 
     store = zarr.open_group(patch_path, mode='r')
     rgb   = store['rgb'][:]                    # (H, W, 3) float32 ∈ [0,1]
@@ -386,6 +388,8 @@ def get_args():
                         '권장: 0.1~0.3')
     p.add_argument('--list_only', action='store_true', default=False,
                    help='패치 경로만 출력하고 추론은 실행하지 않음 (bash 파이프용)')
+    p.add_argument('--inp_mode', default='swirndsi',
+                   help='모델 입력 모드 (기본: swirndsi). 예: swirndsi_pca3')
     return p.parse_args()
 
 
@@ -416,6 +420,6 @@ if __name__ == '__main__':
     for t in targets:
         try:
             visualize_patch(t, args.exp, label_dir, args.gpu,
-                            args.out, args.scene_dir)
+                            args.out, args.scene_dir, inp_mode=args.inp_mode)
         except Exception as e:
             print(f"  [오류] {t}: {e}")

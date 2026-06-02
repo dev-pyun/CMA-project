@@ -30,6 +30,7 @@ class Experiment:
         self.dropout = getattr(args, 'dropout', True)
         self.lr = getattr(args, 'learning_rate', 1e-6)
         self.inp_mode = getattr(args, 'inp_mode', 'swirndsi')
+        self.num_classes = getattr(args, 'num_classes', 3)
         self.weights = None  # set externally by MFB
 
         # Store full config for saving
@@ -40,6 +41,7 @@ class Experiment:
             'dropout': self.dropout,
             'lr': self.lr,
             'inp_mode': self.inp_mode,
+            'num_classes': self.num_classes,
         }
 
         # Directory setup

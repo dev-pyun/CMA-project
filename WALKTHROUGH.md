@@ -1801,3 +1801,109 @@ weights = np.sqrt(median_freq / freq)
 | 표준 MFB | 0.44 | 1.0 | 16.7 |
 | cap(10) MFB | 0.44 | 1.0 | 10.0 |
 | sqrt MFB | 0.66 | 1.0 | 4.1 |
+
+---
+
+## 2026-06-02 | compare_stages.sh — 씬별 폴더 저장 + FCI 자동 복사 + inp_mode 인자 추가
+
+### 변경 이유
+1. 기존 `compare_stages.sh`가 타임스탬프 폴더(`vis_output/{exp_base}_stages_{YYYYMMDD}/`) 에 모든 씬 이미지를 flat하게 저장 → 씬별 정리가 불편함
+2. FCI(False Color Image) 영상을 stage 비교 이미지 옆에 함께 보고 싶음
+3. `swirndsi_pca3`처럼 10채널 모델을 시각화할 때 `inp_mode='swirndsi'`(7채널)가 하드코딩되어 weight mismatch 오류 발생
+
+### 수정 파일
+
+**`compare_stages.sh`**:
+- 출력 경로를 타임스탬프 폴더 → **씬별 폴더** 구조로 변경
+  ```
+  vis_output/<SCENE_NAME>/
+      <SCENE_NAME>_PATCH<N>_<exp>_stage0_comparison.png
+      <SCENE_NAME>_PATCH<N>_<exp>_stage1_comparison.png
+      <SCENE_NAME>_PATCH<N>_<exp>_stage2_comparison.png
+      <SCENE_NAME>_PATCH<N>_<exp>_stage3_comparison.png
+      <SCENE_NAME>_FCI.jpg
+  ```
+- 씬 이름 추출: `basename $PATCH | sed 's/_PATCH[0-9]*\.zarr$//'`
+- **FCI 자동 탐색 및 복사**: `/earth00_home/immj/Landsat/Image/Weddell_Sea/FCI/{year}/{YYYYMM}_FCI/{scene}.jpg` → 씬 폴더에 복사
+  - 촬영일(`SCENE_NAME`의 4번째 필드)에서 `year`, `YYYYMM` 파싱
+- 6번째 인자 `INP_MODE` 추가 (기본값: `swirndsi`), `--inp_mode`로 `visualize_comparison.py`에 전달
+- 사용법:
+  ```bash
+  ./compare_stages.sh exp_swirndsi_pca3 5 0 label_code/labels 0.1 swirndsi_pca3
+  ```
+
+**`visualize_comparison.py`**:
+- `sample_by_gini()` 내 Gini 통과 메시지 출력을 `print()` → `print(..., file=sys.stderr)` 변경
+  - 이전: stdout으로 출력되어 `mapfile`이 패치 경로 목록에 해당 메시지를 포함하는 버그
+  - 이후: stderr로 분리 → bash에서 `2>/dev/null`로 억제되고 패치 목록만 stdout 유지
+- `run_inference(patch_path, exp_name, gpu_id, inp_mode='swirndsi')` — `inp_mode` 파라미터 추가
+- `visualize_patch(..., inp_mode='swirndsi')` — `inp_mode` 파라미터 추가 및 `run_inference`에 전달
+- `--inp_mode` CLI 인자 추가 (기본값: `swirndsi`)
+
+---
+
+## 2026-05-29 | ndsi679 입력 모드 추가 (2-class cloud-only 학습)
+
+### 배경
+cloud shadow를 완전히 제외하고 no-cloud vs cloud 2클래스만 학습하는 실험 모드 추가.
+
+### 입력 구성: `ndsi679` (4채널)
+- NDSI = (B5 - B6) / (B5 + B6)
+- B6 (SWIR1), B7 (SWIR2), B9 (Cirrus)
+
+### 라벨 remapping (2-class)
+| 원래 값 | 새 값 | 의미 |
+|--------|-------|------|
+| 0 (clear) | 0 | no-cloud |
+| 1 (cloud) | 1 | cloud |
+| 2 (shadow) | 255 | **무시** (loss 제외) |
+
+### 변경 파일
+- `dataset/network_input.py`: `inp_ndsi679()` 함수 및 registry 등록
+- `dataset/patch_dataset.py`: `num_classes=2`일 때 shadow→255 remapping
+- `utils/experiment.py`: `num_classes` 속성 추가
+- `network/model.py`: `NUM_CLASSES` 하드코딩 → `exp.num_classes` 동적 참조
+- `train.py`: `--num_classes` 인자 추가
+- `label_generation.py`: `--num_classes` 인자 추가
+- `pipeline.sh`: 4번째 인자 `NUM_CLASSES` 추가 (기본 3)
+
+### 실행 명령어
+```bash
+nohup conda run --no-capture-output -n remote bash pipeline.sh \
+    exp_ndsi679 ndsi679 "0" 2 \
+    > logs/pipeline_ndsi679.log 2>&1 &
+```
+
+---
+
+## 2026-06-02 | num_classes 동적 지원, 새 입력 모드, 3-class 인프라 보강
+
+### 배경
+3-class 전환 이후 추가 유연성 확보: `num_classes`를 하드코딩 대신 런타임 인자로 받도록 전체 파이프라인 개선. 2-class 실험(`ndsi679`)을 위한 shadow→ignore 처리 추가.
+
+### 변경 파일 요약
+
+| 파일 | 변경 내용 |
+|---|---|
+| `network/model.py` | `num_classes`를 `getattr(self.exp, 'num_classes', NUM_CLASSES)`로 동적 참조 (NUM_CLASSES=3 기본값 유지) |
+| `label_generation.py` | `--num_classes` 인자 추가 (기본 3), `setup_data`에 전달 |
+| `train.py` | `--num_classes` 인자 추가, `setup_data` / `Model` / `get_MFB_weights`에 전달 |
+| `dataset/patch_dataset.py` | `PatchDataset`에 `num_classes` 파라미터 추가; 2-class 모드 시 shadow(2) → NODATA_LABEL(255) 자동 변환 |
+| `dataset/network_input.py` | `inp_swirndsindwi_pca3` (11ch), `inp_ndsi679` (4ch) 모드 추가 |
+| `compare_scene.py` | `_detect_num_classes()` 추가 — 체크포인트 conv_final.weight shape으로 num_classes 자동 감지; dpi 120→300 |
+| `utils/experiment.py` | `num_classes` 속성 저장 |
+| `update_train_labels.py` | 신규: TRAIN_ZARR label binary→3-class in-place 업데이트 스크립트 |
+| `test_pipeline.py` | 신규: 3-class 파이프라인 16개 항목 검증 (16/16 PASS 확인) |
+
+### 새 입력 모드
+- `swirndsindwi_pca3`: B2–B7 + NDSI + NDWI + global PCA PC1-3 (11ch)
+- `ndsi679`: NDSI(B5,B6) + B6 + B7 + B9 (4ch) — 2-class cloud-only 실험용
+
+### num_classes 사용 예시
+```bash
+# 3-class (기본)
+python train.py -e my_exp_stage0 -st 0 -ip swirndsi --num_classes 3
+
+# 2-class (shadow → ignore)
+python train.py -e my_exp_stage0 -st 0 -ip ndsi679 --num_classes 2
+```

@@ -32,9 +32,10 @@
 
 set -e
 
-EXP_NAME=${1:?"Usage: ./pipeline.sh <experiment_name> [input_mode] [gpu_ids]"}
+EXP_NAME=${1:?"Usage: ./pipeline.sh <experiment_name> [input_mode] [gpu_ids] [num_classes]"}
 INP_MODE=${2:-swirndsi}
 GPU_IDS=${3:-"0 1"}
+NUM_CLASSES=${4:-3}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -45,6 +46,7 @@ echo "=============================================="
 echo "Self-Training Pipeline: ${EXP_NAME}"
 echo "Input Mode: ${INP_MODE}"
 echo "GPUs: ${GPU_IDS}"
+echo "Num Classes: ${NUM_CLASSES}"
 echo "=============================================="
 
 # ------------------------------------------------------------------
@@ -60,7 +62,8 @@ ${CONDA_RUN} python train.py \
     -lr 0.000001 \
     -ep 400 \
     -bs 64 \
-    -gpu ${GPU_IDS}
+    -gpu ${GPU_IDS} \
+    --num_classes ${NUM_CLASSES}
 
 # ------------------------------------------------------------------
 # Stage 1: Generate pseudo-labels from stage 0 model,
@@ -72,7 +75,8 @@ ${CONDA_RUN} python label_generation.py \
     -e ${EXP_NAME}_stage0 \
     -st 1 \
     -ip ${INP_MODE} \
-    -gpu ${GPU_IDS}
+    -gpu ${GPU_IDS} \
+    --num_classes ${NUM_CLASSES}
 
 echo ">>> STAGE 1: Training..."
 ${CONDA_RUN} python train.py \
@@ -82,7 +86,8 @@ ${CONDA_RUN} python train.py \
     -lr 0.000001 \
     -ep 400 \
     -bs 64 \
-    -gpu ${GPU_IDS}
+    -gpu ${GPU_IDS} \
+    --num_classes ${NUM_CLASSES}
 
 # ------------------------------------------------------------------
 # Stage 2: depth=6, filters=24
@@ -93,7 +98,8 @@ ${CONDA_RUN} python label_generation.py \
     -e ${EXP_NAME}_stage1 \
     -st 2 \
     -ip ${INP_MODE} \
-    -gpu ${GPU_IDS}
+    -gpu ${GPU_IDS} \
+    --num_classes ${NUM_CLASSES}
 
 echo ">>> STAGE 2: Training..."
 ${CONDA_RUN} python train.py \
@@ -103,7 +109,8 @@ ${CONDA_RUN} python train.py \
     -lr 0.000001 \
     -ep 400 \
     -bs 64 \
-    -gpu ${GPU_IDS}
+    -gpu ${GPU_IDS} \
+    --num_classes ${NUM_CLASSES}
 
 # ------------------------------------------------------------------
 # Stage 3: Final network (depth=6, filters=32, largest)
@@ -114,7 +121,8 @@ ${CONDA_RUN} python label_generation.py \
     -e ${EXP_NAME}_stage2 \
     -st 3 \
     -ip ${INP_MODE} \
-    -gpu ${GPU_IDS}
+    -gpu ${GPU_IDS} \
+    --num_classes ${NUM_CLASSES}
 
 echo ">>> STAGE 3: Training..."
 ${CONDA_RUN} python train.py \
@@ -124,7 +132,8 @@ ${CONDA_RUN} python train.py \
     -lr 0.000001 \
     -ep 400 \
     -bs 64 \
-    -gpu ${GPU_IDS}
+    -gpu ${GPU_IDS} \
+    --num_classes ${NUM_CLASSES}
 
 echo ""
 echo "=============================================="

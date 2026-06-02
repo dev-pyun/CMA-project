@@ -86,6 +86,11 @@ def get_args(argv=None):
                         help='Index names for custom mode '
                              '(e.g. --indices NDSI NDWI NDVI)')
 
+    # Class configuration
+    parser.add_argument('--num_classes', type=int, default=3,
+                        help='Number of output classes (default: 3). '
+                             'Use 2 for ndsi679 mode (shadow ignored as nodata).')
+
     # Reproducibility
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
@@ -116,15 +121,17 @@ if __name__ == '__main__':
         args.batch_size, mode='train',
         stage=args.stage, path=TRAIN_PATH,
         full=args.full, aug=args.aug,
-        reset=args.reset_stage_data)
+        reset=args.reset_stage_data,
+        num_classes=args.num_classes)
 
-    test_loader = setup_data(args.batch_size, mode='test', path=VALID_PATH)
+    test_loader = setup_data(args.batch_size, mode='test', path=VALID_PATH,
+                             num_classes=args.num_classes)
 
     # Initialize model
     model = Model(exp, gpu_id=args.gpu_id)
 
     # Compute class weights via Median Frequency Balancing
-    exp.weights = get_MFB_weights(train_loader)
+    exp.weights = get_MFB_weights(train_loader, num_classes=args.num_classes)
 
     # ---- Training loop ----
     for epoch in range(args.num_epochs):

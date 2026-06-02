@@ -110,7 +110,7 @@ def split_data(h5_folder, stage_0_ratio=0.25, stages=4):
 
 
 def setup_data(batch_size=1, mode='train', stage=0, path=None,
-               full=False, aug=False, reset=False):
+               full=False, aug=False, reset=False, num_classes=3):
     """
     Set up the PyTorch DataLoader for a given mode and stage.
 
@@ -145,7 +145,8 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
             file_path = os.path.join(path, 'stage_full.txt')
             with open(file_path) as fl:
                 files_list = [line.rstrip() for line in fl]
-            datasets.append(PatchDataset(mode, file_list=files_list, stage=0, aug=aug))
+            datasets.append(PatchDataset(mode, file_list=files_list, stage=0, aug=aug,
+                                         num_classes=num_classes))
             logger.info(f'Full train set size: {len(files_list)}')
         else:
             for i in range(stage + 1):
@@ -154,7 +155,8 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
                     files_list = [line.rstrip() for line in fl]
                 stage_aug = bool(stage) if aug else aug
                 datasets.append(
-                    PatchDataset(mode, file_list=files_list, stage=i, aug=stage_aug))
+                    PatchDataset(mode, file_list=files_list, stage=i, aug=stage_aug,
+                                 num_classes=num_classes))
                 logger.info(f'Stage {i} train set size: {len(files_list)}')
 
     elif mode == 'label_gen':
@@ -162,13 +164,15 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
             file_path = os.path.join(path, f'stage_{i}.txt')
             with open(file_path) as fl:
                 files_list = [line.rstrip() for line in fl]
-            datasets.append(PatchDataset(mode, file_list=files_list, stage=i, aug=False))
+            datasets.append(PatchDataset(mode, file_list=files_list, stage=i, aug=False,
+                                         num_classes=num_classes))
 
     else:  # test / predict
         files_list = glob.glob(os.path.join(path, '*.zarr'))
         if not files_list:
             raise FileNotFoundError(f'No .zarr patches found in {path}')
-        datasets.append(PatchDataset(mode, file_list=files_list, stage=stage, aug=False))
+        datasets.append(PatchDataset(mode, file_list=files_list, stage=stage, aug=False,
+                                     num_classes=num_classes))
 
     concat_dataset = ConcatDataset(datasets)
     dataloader = torch.utils.data.DataLoader(
@@ -190,12 +194,13 @@ class PatchDataset(Dataset):
         label        : (1,  H+2, W+2) int64  — 0/1 binary, 255=nodata (ignored)
     """
 
-    def __init__(self, mode, file_list, stage=0, aug=False):
-        self.mode      = mode
-        self.stage     = stage
-        self.file_list = file_list
-        self.size      = len(self.file_list)
-        self.device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    def __init__(self, mode, file_list, stage=0, aug=False, num_classes=3):
+        self.mode        = mode
+        self.stage       = stage
+        self.file_list   = file_list
+        self.size        = len(self.file_list)
+        self.device      = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.num_classes = num_classes  # if 2, shadow(2) → NODATA_LABEL(255)
 
         self.transforms = None
         if mode == 'train' and aug:
@@ -238,6 +243,10 @@ class PatchDataset(Dataset):
                 label = store['pseudo_label'][:]
         else:
             label = store['label'][:]
+
+        # Remap shadow → NODATA for 2-class mode (shadow must not be used in training)
+        if self.num_classes == 2:
+            label[label == 2] = NODATA_LABEL
 
         label = label[:, :, None]  # (H, W, 1) = (256, 256, 1)
 
