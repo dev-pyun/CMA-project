@@ -18,6 +18,7 @@ vis_output/
 output_vis/
 cv_vis/
 pca_vis/
+val_confusion/
 
 # Python cache
 __pycache__/

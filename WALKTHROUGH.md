@@ -1936,3 +1936,82 @@ python train.py -e my_exp_stage0 -st 0 -ip swirndsi --num_classes 3
 # 2-class (shadow → ignore)
 python train.py -e my_exp_stage0 -st 0 -ip ndsi679 --num_classes 2
 ```
+
+---
+
+## [2026-06-05] Validation Confusion Matrix 평가 파이프라인
+
+### 목적
+학습된 20개 모델 (5 experiment × 4 stage)을 GT 라벨링된 8개 씬에 대해 평가하여 각 모델별 혼동 행렬 및 Overall Accuracy(OA)를 계산한다.
+
+### 평가 대상 씬 (GT 라벨 있는 8개)
+```
+LC08_L1GT_165110_20200302_20201016_02_T2
+LC08_L1GT_171110_20200225_20201016_02_T2
+LC08_L1GT_177110_20200219_20201016_02_T2
+LC08_L1GT_181098_20200419_20201016_02_T2
+LC08_L1GT_188114_20201114_20210315_02_T2
+LC08_L1GT_199105_20201213_20210314_02_T2
+LC08_L1GT_199110_20200128_20201016_02_T2
+LC08_L1GT_200111_20201017_20201105_02_T2
+```
+
+### Experiment 설정
+| exp_base | inp_mode | num_classes |
+|----------|----------|-------------|
+| exp_cirrus_ndsi | cirrus_ndsi | 2 |
+| exp_ndsi679 | ndsi679 | 2 |
+| exp_swirndsi_pca3 | swirndsi_pca3 | 3 |
+| swirndsi_trial2 | swirndsi | 2 |
+| swirndsindwi_trial1 | swirndsindwi | 2 |
+
+### 라벨 리맵 규칙
+**GT** (napari labels): `{4}→1(cloud), {3}→2(shadow), {1,2}→0(no-cloud), {0,255}→255(nodata)`  
+**Fmask** (cfmask.tif): `{1}→1(cloud), {2}→2(shadow), {0,3,4}→0(no-cloud), {255}→255(nodata)`
+
+### 혼동 행렬 구조
+각 모델(stage)당 3개 생성:
+1. `gt_vs_fmask.png` — GT(행) vs Fmask(열): Fmask 품질 기준
+2. `gt_vs_{exp_base}.png` — GT(행) vs 모델(열): 모델 성능
+3. `fmask_vs_{exp_base}.png` — Fmask(행) vs 모델(열): Fmask 대비 개선도
+
+**2-class**: shadow(2) 픽셀 및 nodata(255) 제외 → 2×2 행렬  
+**3-class**: nodata(255)만 제외 → 3×3 행렬
+
+유효 픽셀 조건: `true < n_classes AND pred < n_classes` (255=nodata 및 2=shadow in 2-class 자동 제외)
+
+### 타일 추론 전략
+- 타일 크기: 256×256 (1-pixel real border → 258×258 입력)
+- 커버리지: `math.ceil(H/256) × math.ceil(W/256)` (끝 타일 클램프하여 전체 씬 커버)
+- 파생 피처(RGB/HSV/Sobel): 타일별 독립 계산 (학습 시 per-patch percentile normalization 재현)
+
+### 병렬화 전략
+- 5개 프로세스 (`multiprocessing.spawn`), 실험 패밀리별 1개
+- 각 프로세스 내에서 stage 0→3 순차 처리
+- GPU 할당: `process_idx % n_gpus` (2 GPU 기준: exp 0,2,4 → GPU 0; exp 1,3 → GPU 1)
+
+### 출력 구조
+```
+src/val_confusion/
+├── {exp_base}_stage{N}/
+│   ├── gt_vs_fmask.png
+│   ├── gt_vs_{exp_base}.png
+│   └── fmask_vs_{exp_base}.png
+└── summary_oa.csv   # exp_name, oa_gt_fmask, oa_gt_model, oa_fmask_model
+```
+
+### 신규/수정 파일
+| 파일 | 역할 |
+|------|------|
+| `utils/scene_inference.py` | 씬 데이터 로드, 타일 추론, CM 누적 유틸 함수 |
+| `compute_val_confusion.py` | 메인 평가 스크립트 (multiprocessing Pool 5) |
+| `run_val_confusion.sh` | nohup 실행 래퍼 |
+
+### 실행
+```bash
+cd /home/pyuncb/src
+nohup /home/pyuncb/.conda/envs/cloud/bin/python compute_val_confusion.py \
+  > logs/val_confusion.log 2>&1 &
+# 또는:
+bash run_val_confusion.sh
+```
