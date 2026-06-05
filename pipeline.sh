@@ -40,6 +40,9 @@ NUM_CLASSES=${4:-3}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
 CONDA_RUN="conda run -n remote"
 
 echo "=============================================="

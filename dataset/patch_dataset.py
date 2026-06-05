@@ -38,13 +38,18 @@ from dataset.transforms import VerticalFlip, HorizontalFlip, Rotate90, CutOut, Z
 logger = logging.getLogger(__name__)
 np.set_printoptions(precision=4, suppress=True)
 
-WORKERS = 6
+WORKERS = 4
 
 
 def _worker_init_fn(worker_id):
-    # Each DataLoader worker has its own blosc thread pool.
-    # Limit to 1 so WORKERS × blosc threads doesn't blow past the CPU budget.
+    import os, torch
+    # blosc: zarr 압축 해제 스레드 1개로 제한
     numcodecs.blosc.set_nthreads(1)
+    # PyTorch CPU 연산 스레드 1개로 제한 (워커 내부)
+    torch.set_num_threads(1)
+    # OpenMP / MKL (numpy) 스레드 1개로 제한
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
 
 N_SPECTRAL_BANDS = 8   # spectral channels in zarr 'spectral' array
 N_DERIVED        = 9   # rgb(3) + hsv(3) + sobel(3)
@@ -160,12 +165,12 @@ def setup_data(batch_size=1, mode='train', stage=0, path=None,
                 logger.info(f'Stage {i} train set size: {len(files_list)}')
 
     elif mode == 'label_gen':
-        for i in range(1, stage + 1):
-            file_path = os.path.join(path, f'stage_{i}.txt')
-            with open(file_path) as fl:
-                files_list = [line.rstrip() for line in fl]
-            datasets.append(PatchDataset(mode, file_list=files_list, stage=i, aug=False,
-                                         num_classes=num_classes))
+        # 새로 추가된 stage 데이터만 라벨 생성 (이전 stage 데이터는 기존 pseudo-label 유지)
+        file_path = os.path.join(path, f'stage_{stage}.txt')
+        with open(file_path) as fl:
+            files_list = [line.rstrip() for line in fl]
+        datasets.append(PatchDataset(mode, file_list=files_list, stage=stage, aug=False,
+                                     num_classes=num_classes))
 
     else:  # test / predict
         files_list = glob.glob(os.path.join(path, '*.zarr'))

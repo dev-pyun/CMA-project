@@ -1842,6 +1842,35 @@ weights = np.sqrt(median_freq / freq)
 
 ---
 
+## 2026-06-02 | label_gen — 신규 데이터만 pseudo-label 생성하도록 수정
+
+### 변경 이유
+기존에는 `label_generation.py -st N` 실행 시 `stage_1.txt ~ stage_N.txt` 전체를 재라벨링했음.
+예: stage 2 label_gen → stage_1(25%) + stage_2(25%) = 50% 전부 재추론 → 불필요한 연산.
+이전 stage에서 이미 생성된 pseudo-label은 그대로 유지하고, 새로 추가되는 데이터만 라벨을 생성하도록 변경.
+
+### 수정 파일
+
+**`dataset/patch_dataset.py`** (label_gen 모드):
+```python
+# 변경 전
+for i in range(1, stage + 1):   # stage_1 ~ stage_N 전부 로드
+    ...
+
+# 변경 후
+# stage_N.txt 만 로드 (새로 추가된 데이터만)
+file_path = os.path.join(path, f'stage_{stage}.txt')
+```
+
+### 효과
+| 호출 | 변경 전 | 변경 후 |
+|------|---------|---------|
+| `-st 1` | stage_1 (25%) | stage_1 (25%) — 동일 |
+| `-st 2` | stage_1+2 (50%) | stage_2 (25%) — 절반으로 감소 |
+| `-st 3` | stage_1+2+3 (75%) | stage_3 (25%) — 1/3으로 감소 |
+
+---
+
 ## 2026-05-29 | ndsi679 입력 모드 추가 (2-class cloud-only 학습)
 
 ### 배경

@@ -105,7 +105,7 @@ def get_args(argv=None):
 if __name__ == '__main__':
     args = get_args()
 
-    torch.set_num_threads(6)
+    torch.set_num_threads(2)
 
     # Store custom band/index info in args for Experiment
     if args.inp_mode == 'custom':
